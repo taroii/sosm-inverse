@@ -1,0 +1,500 @@
+"""
+Binary SOSM forward model on the manufactured solution of Baier-Reinio & Farrell.
+
+DERIVED FROM Aaron Baier-Reinio's code, used with permission:
+  - multicomponent_code/manufactured_solution.py            (physics, residual, MMS)
+  - multicomponent_electrolyte_code/unsteady_hull_cell_2d.py (constraint formulation)
+Original papers: doi:10.1137/25M1734385 and arXiv:2510.14923.
+
+WHAT IS COPIED, WHAT IS CHANGED
+-------------------------------
+Copied essentially verbatim from `manufactured_solution.py`: the constitutive
+relations, the manufactured solution, and the four residual blocks (A_visc,
+A_osm, B_blf, BT_blf) plus the constitutive/density/forcing terms.
+
+Changed, deliberately, in one place: **how the constants in (mu_1, mu_2, p) are
+fixed.** The original augments those spaces with constants, kills the resulting
+singularity with point Dirichlet BCs (`FixAtPointBC`), and then restores the
+true integral constraints via the Woodbury identity executed inside a custom
+SNES convergence-test callback. That callback does raw PETSc vector surgery and
+`pyadjoint` cannot tape it, which makes the original residual non-differentiable
+for our purposes.
+
+We instead follow the newer electrolyte code: carry the three constants as
+real-space (`"R"`) fields in the mixed space, use the augmented combinations
+`mu_i + l_i` and `p + l_p` throughout the residual, and append the three
+integral constraints as ordinary variational terms. The result is a single
+UFL residual solved by one `NonlinearVariationalSolver` -- fully tapeable.
+
+The three constraints are exactly the ones the original asserts after its solve:
+    int c_1 = c_1_integral,   int c_2 = c_2_integral,   int (x_1 + x_2) = |Omega|
+
+>>> NOT YET VALIDATED. This module has never been executed -- Firedrake is not
+>>> installed on the machine where it was written. `fig01_convergence.py`
+>>> is the gate: it must reproduce the convergence rates of the original before
+>>> anything downstream is trusted. The constraint reformulation above is the
+>>> part most likely to be wrong, since it is the part that is not a copy.
+"""
+
+from firedrake import *
+from firedrake.petsc import PETSc
+
+__all__ = ["SOSMProblem", "solve_forward"]
+
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+
+class SOSMProblem:
+    """A binary SOSM manufactured-solution problem on the unit square/cube.
+
+    The Stefan-Maxwell diffusivity D_12 is held as a real-space `Function` so
+    that `firedrake.adjoint` can take it as a Control. Everything else is a
+    fixed `Constant`.
+
+    Note on the manufactured solution: it is built from *two* parameters
+    D_1, D_2 with D_12 = D_1 * D_2, because the exact fields are
+    mu_i = g / D_i and v_i = D_i grad(g). The exact solution therefore depends
+    on the split of D_12 into (D_1, D_2), not on the product alone.
+
+    For the inverse problem this is exactly what we want. The problem *data*
+    -- the forcing terms r_1, r_2, f and the boundary data -- are generated
+    once at the true (D_1, D_2) and then held fixed; they are the experimental
+    configuration. Only D_12, appearing in the Onsager block A_osm, is varied.
+    At D_12 = D_1 * D_2 the discrete solution recovers the manufactured
+    solution up to discretization error, which gives a known ground truth.
+    """
+
+    def __init__(self, d=2, k=4, mesh_type="tet", N_mesh=8,
+                 D_1=0.5, D_2=2.0, deg_max=15,
+                 eta=1e-1, zeta=1e-1, gamma=1e1,
+                 density_consistency=True, use_grad_rho_inv_exact=False,
+                 newton_atol=1e-10, newton_max_it=10):
+        assert d in (2, 3)
+        assert mesh_type in ("tet", "hex")
+
+        self.d = d
+        self.k = k
+        self.mesh_type = mesh_type
+        self.N_mesh = N_mesh
+        self.deg_max = deg_max
+        self.density_consistency = density_consistency
+        self.use_grad_rho_inv_exact = use_grad_rho_inv_exact
+        self.newton_atol = newton_atol
+        self.newton_max_it = newton_max_it
+
+        self._build_mesh()
+
+        # -- Physical parameters. -------------------------------------------
+        # The manufactured solution requires M_1 = M_2 = 1 and RT = 1.
+        self.M_1 = Constant(1.0)
+        self.M_2 = Constant(1.0)
+        self.RT = Constant(1.0)
+
+        self.D_1 = Constant(D_1)
+        self.D_2 = Constant(D_2)
+
+        self.eta = Constant(eta)
+        self.zeta = Constant(zeta)
+        self.lame = self.zeta - (2.0 * self.eta / d)
+        self.gamma = Constant(gamma)
+
+        # The inference target, as an R-space Function so it can be a Control.
+        self.R0 = FunctionSpace(self.mesh, "R", 0)
+        self.D_12 = Function(self.R0, name="D_12")
+        self.D_12.assign(D_1 * D_2)
+
+        self._build_manufactured_solution()
+        self._build_spaces()
+
+    # -- Mesh ---------------------------------------------------------------
+
+    def _build_mesh(self):
+        d, N, mt = self.d, self.N_mesh, self.mesh_type
+
+        if d == 2:
+            self.mesh = UnitSquareMesh(N, N, quadrilateral=(mt == "hex"))
+            self.bc_markers = (1, 2, 3, 4)
+            self.dx = dx(self.mesh, degree=self.deg_max)
+            self.ds = ds(self.mesh, degree=self.deg_max)
+        else:
+            if mt == "tet":
+                self.mesh = UnitCubeMesh(N, N, N)
+                self.bc_markers = (1, 2, 3, 4, 5, 6)
+                self.dx = dx(self.mesh, degree=self.deg_max)
+                self.ds = ds(self.mesh, degree=self.deg_max)
+            else:
+                self.mesh = ExtrudedMesh(UnitSquareMesh(N, N, quadrilateral=True), N)
+                self.bc_markers = (1, 2, 3, 4, "top", "bottom")
+                self.dx = dx(self.mesh, degree=self.deg_max)
+                self.ds = (ds_t(self.mesh, degree=self.deg_max)
+                           + ds_b(self.mesh, degree=self.deg_max)
+                           + ds_v(self.mesh, degree=self.deg_max))
+
+        self.vol = assemble(1.0 * self.dx)
+        self.nml = FacetNormal(self.mesh)
+        self.Id = Identity(self.d)
+
+    # -- Constitutive relations (verbatim from the original) ----------------
+
+    def mu_relation(self, x_1, x_2, p):
+        """Ideal gas law for the chemical potentials."""
+        return (self.RT * ln(x_1 * p), self.RT * ln(x_2 * p))
+
+    def conc_relation(self, x_1, x_2, p):
+        """Volumetric equation of state."""
+        x_1_nm = x_1 / (x_1 + x_2)
+        x_2_nm = x_2 / (x_1 + x_2)
+        c_tot = p / self.RT
+        return (c_tot, x_1_nm * c_tot, x_2_nm * c_tot)
+
+    # -- Manufactured solution (verbatim from the original) -----------------
+
+    def _build_manufactured_solution(self):
+        d = self.d
+        M_1, M_2 = self.M_1, self.M_2
+        D_1, D_2 = self.D_1, self.D_2
+
+        x = SpatialCoordinate(self.mesh)
+        if d == 2:
+            g = sin(pi * x[0]) * sin(pi * x[1])
+        else:
+            g = sin(pi * x[0]) * sin(pi * x[1]) * sin(pi * x[2])
+        self.g_ms = g
+
+        self.mu_1_ms = g / D_1
+        self.mu_2_ms = g / D_2
+
+        c_1 = exp(self.mu_1_ms)
+        c_2 = exp(self.mu_2_ms)
+        self.c_1_ms, self.c_2_ms = c_1, c_2
+
+        c_T = c_1 + c_2
+        rho = (M_1 * c_1) + (M_2 * c_2)
+        self.c_T_ms, self.rho_ms = c_T, rho
+        self.rho_inv_ms = 1.0 / rho
+
+        self.x_1_ms = c_1 / c_T
+        self.x_2_ms = c_2 / c_T
+
+        omega_1 = (M_1 * c_1) / rho
+        omega_2 = (M_2 * c_2) / rho
+
+        v_1 = D_1 * grad(g)
+        v_2 = D_2 * grad(g)
+        self.v_ms = (omega_1 * v_1) + (omega_2 * v_2)
+
+        self.mm_1_ms = M_1 * c_1 * v_1
+        self.mm_2_ms = M_2 * c_2 * v_2
+
+        eps_v = sym(grad(self.v_ms))
+        tau = (2.0 * self.eta * eps_v) + self.lame * tr(eps_v) * self.Id
+        self.p_ms = c_T
+
+        # -- Problem data. Generated once, at the true (D_1, D_2), and then
+        # -- held fixed. This is the "experimental configuration".
+        self.f = (grad(self.p_ms) - div(tau)) / rho
+        self.r_1 = div(c_1 * v_1)
+        self.r_2 = div(c_2 * v_2)
+
+        self.g_v = self.v_ms
+
+        # Scaled at solve time to satisfy the discrete compatibility condition.
+        self.T_1 = Constant(1.0)
+        self.T_2 = Constant(1.0)
+        self.g_1 = self.T_1 * self.mm_1_ms
+        self.g_2 = self.T_2 * self.mm_2_ms
+
+        # The three integral constraints that replace point BCs + Woodbury.
+        self.c_1_integral = Constant(assemble(c_1 * self.dx))
+        self.c_2_integral = Constant(assemble(c_2 * self.dx))
+        self.mfs_integral = Constant(self.vol)
+
+    # -- Discrete spaces ----------------------------------------------------
+
+    def _build_spaces(self):
+        mesh, k, d, mt = self.mesh, self.k, self.d, self.mesh_type
+
+        if mt == "tet":
+            cell = triangle if d == 2 else tetrahedron
+            flux_family, dg = "RT", "DG"
+        else:
+            cell = quadrilateral if d == 2 else hexahedron
+            flux_family, dg = ("RTCF" if d == 2 else "NCF"), "DQ"
+
+        var = "equispaced"
+
+        W_1 = FunctionSpace(mesh, flux_family, k)                                  # species 1 mass flux
+        W_2 = FunctionSpace(mesh, flux_family, k)                                  # species 2 mass flux
+        V = VectorFunctionSpace(mesh, "CG", k)                                     # barycentric velocity
+        U_1 = FunctionSpace(mesh, FiniteElement(dg, cell, k - 1, variant=var))     # chemical potential 1
+        U_2 = FunctionSpace(mesh, FiniteElement(dg, cell, k - 1, variant=var))     # chemical potential 2
+        P = FunctionSpace(mesh, "CG", k - 1)                                       # pressure
+        X_1 = FunctionSpace(mesh, dg, k - 1)                                       # mole fraction 1
+        X_2 = FunctionSpace(mesh, dg, k - 1)                                       # mole fraction 2
+        R = FunctionSpace(mesh, "CG", k - 1)                                       # density reciprocal
+        L = FunctionSpace(mesh, "R", 0)                                            # the three constants
+
+        # Field order is fixed here and relied on by `split` below and by any
+        # fieldsplit solver configuration. The three "R" fields come last.
+        self.Z = W_1 * W_2 * V * U_1 * U_2 * P * X_1 * X_2 * R * L * L * L
+        self.spaces = dict(W_1=W_1, W_2=W_2, V=V, U_1=U_1, U_2=U_2,
+                           P=P, X_1=X_1, X_2=X_2, R=R, L=L)
+        self.num_lagrange_mults = 3
+        self.Sm = FunctionSpace(mesh, dg, k + 2)
+
+    # -- Utilities ----------------------------------------------------------
+
+    def _project(self, expr, space, bcs=None):
+        params = {"ksp_type": "gmres",
+                  "ksp_max_it": 3,
+                  "ksp_convergence_test": "skip",
+                  "pc_type": "lu",
+                  "pc_factor_mat_solver_type": "mumps",
+                  "mat_mumps_icntl_14": 105}
+        return project(expr, space, bcs=bcs,
+                       solver_parameters=params,
+                       form_compiler_parameters={"quadrature_degree": self.deg_max})
+
+    def _fix_compatibility(self):
+        """Rescale the flux BCs so the compatibility condition holds discretely.
+
+        Verbatim in effect from the original: T_i is chosen so that the
+        integrated source matches the boundary flux at the discrete level.
+        """
+        aux_1 = self._project(self.g_1, self.spaces["W_1"],
+                              bcs=[DirichletBC(self.spaces["W_1"], self.g_1, self.bc_markers)])
+        aux_2 = self._project(self.g_2, self.spaces["W_2"],
+                              bcs=[DirichletBC(self.spaces["W_2"], self.g_2, self.bc_markers)])
+
+        r_1_d = self._project(self.r_1, self.Sm)
+        r_2_d = self._project(self.r_2, self.Sm)
+
+        self.T_1.assign(float(self.M_1) * assemble(r_1_d * self.dx)
+                        / assemble(inner(aux_1, self.nml) * self.ds))
+        self.T_2.assign(float(self.M_2) * assemble(r_2_d * self.dx)
+                        / assemble(inner(aux_2, self.nml) * self.ds))
+
+        return r_1_d, r_2_d
+
+    # -- The residual -------------------------------------------------------
+
+    def residual(self, sln, r_1_d, r_2_d):
+        """The full nonlinear SOSM residual F(U, D_12) as a single UFL form."""
+        dx_, ds_ = self.dx, self.ds
+        M_1, M_2, RT = self.M_1, self.M_2, self.RT
+        eta, lame, gamma = self.eta, self.lame, self.gamma
+
+        (mm_1, mm_2, v, mu_1, mu_2, p, x_1, x_2, rho_inv,
+         l_1, l_2, l_p) = split(sln)
+        (u_1, u_2, u, w_1, w_2, q, y_1, y_2, r,
+         t_1, t_2, t_p) = TestFunctions(self.Z)
+
+        # The augmented fields: the DG/CG part plus its real-space constant.
+        # These -- not the bare fields -- are the physical mu_1, mu_2, p, and
+        # they are what appears everywhere below.
+        mu_1_a = mu_1 + l_1
+        mu_2_a = mu_2 + l_2
+        p_a = p + l_p
+
+        grad_rho_inv = grad(self.rho_inv_ms) if self.use_grad_rho_inv_exact else grad(rho_inv)
+
+        c_tot, c_1, c_2 = self.conc_relation(x_1, x_2, p_a)
+
+        # -- Stokes viscous terms.
+        A_visc = 2.0 * eta * inner(sym(grad(v)), sym(grad(u))) * dx_
+        A_visc += lame * inner(div(v), div(u)) * dx_
+
+        # -- Augmented Onsager transport terms. D_12 enters ONLY here.
+        A_osm = (RT / ((c_1 + c_2) * self.D_12)) * (
+            (c_2 / (M_1 * M_1 * c_1)) * inner(mm_1, u_1)
+            + (c_1 / (M_2 * M_2 * c_2)) * inner(mm_2, u_2)
+            - (1.0 / (M_1 * M_2)) * (inner(mm_1, u_2) + inner(mm_2, u_1))) * dx_
+        A_osm += gamma * inner(v - (rho_inv * (mm_1 + mm_2)),
+                               u - (rho_inv * (u_1 + u_2))) * dx_
+
+        # -- Driving forces and the Stokes pressure term.
+        B = (inner(p_a, (rho_inv * div(u_1 + u_2)) + dot(grad_rho_inv, u_1 + u_2))
+             - inner(p_a, div(u))) * dx_
+        B -= ((1.0 / M_1) * inner(mu_1_a, div(u_1))
+              + (1.0 / M_2) * inner(mu_2_a, div(u_2))) * dx_
+
+        # -- Mass-average constraint and continuity.
+        BT = (inner(q, (rho_inv * div(mm_1 + mm_2)) + dot(grad_rho_inv, mm_1 + mm_2))
+              - inner(q, div(v))) * dx_
+        BT -= ((1.0 / M_1) * inner(w_1, div(mm_1))
+               + (1.0 / M_2) * inner(w_2, div(mm_2))) * dx_
+
+        res = A_visc + A_osm + B + BT
+
+        # -- Thermodynamic constitutive relation.
+        mu_1_cr, mu_2_cr = self.mu_relation(x_1, x_2, p_a)
+        res += (inner(mu_1_a - mu_1_cr, y_1) + inner(mu_2_a - mu_2_cr, y_2)) * dx_
+
+        # -- Density reciprocal.
+        res += inner(1.0 / rho_inv, r) * dx_
+        res -= inner((M_1 * c_1) + (M_2 * c_2), r) * dx_
+
+        # -- Density consistency.
+        if self.density_consistency:
+            res -= q * inner((rho_inv * (mm_1 + mm_2)) - v, self.nml) * ds_
+
+        # -- Forcing.
+        res -= (inner(self.f * ((M_1 * c_1) + (M_2 * c_2)), u)
+                - inner(w_1, r_1_d) - inner(w_2, r_2_d)) * dx_
+
+        # -- The three integral constraints, replacing point BCs + Woodbury.
+        # Each reads  int (field - target/|Omega|) * t = 0  for t constant,
+        # i.e. exactly  int field = target.
+        res += (c_1 - self.c_1_integral / self.vol) * t_1 * dx_
+        res += (c_2 - self.c_2_integral / self.vol) * t_2 * dx_
+        res += ((x_1 + x_2) - self.mfs_integral / self.vol) * t_p * dx_
+
+        return res
+
+    # -- Boundary conditions and initial guess ------------------------------
+
+    def bcs(self):
+        return [DirichletBC(self.Z.sub(0), self.g_1, self.bc_markers),
+                DirichletBC(self.Z.sub(1), self.g_2, self.bc_markers),
+                DirichletBC(self.Z.sub(2), self.g_v, self.bc_markers)]
+
+    def initial_guess(self):
+        """L^2 projection of the exact solution, as in the original."""
+        sln = Function(self.Z)
+        mm_1, mm_2, v, mu_1, mu_2, p, x_1, x_2, rho_inv, l_1, l_2, l_p = sln.subfunctions
+
+        S = self.spaces
+        mm_1.assign(self._project(self.mm_1_ms, S["W_1"]))
+        mm_2.assign(self._project(self.mm_2_ms, S["W_2"]))
+        v.assign(self._project(self.v_ms, S["V"]))
+        mu_1.assign(self._project(self.mu_1_ms, S["U_1"]))
+        mu_2.assign(self._project(self.mu_2_ms, S["U_2"]))
+        p.assign(self._project(self.p_ms, S["P"]))
+        x_1.assign(self._project(self.x_1_ms, S["X_1"]))
+        x_2.assign(self._project(self.x_2_ms, S["X_2"]))
+        rho_inv.assign(self._project(self.rho_inv_ms, S["R"]))
+        # The constants start at zero: the projections above already carry the
+        # full field, so the split between (mu_i, l_i) starts all-in-mu_i.
+        l_1.assign(0.0)
+        l_2.assign(0.0)
+        l_p.assign(0.0)
+
+        return sln
+
+    # -- Solver -------------------------------------------------------------
+
+    def solver_parameters(self, monolithic=True):
+        """Newton parameters.
+
+        `monolithic=True` reproduces the original: a direct LU on the whole
+        mixed system. Correct, and the right choice for validation, but it is
+        the configuration responsible for the 1-2 TB figure in the original
+        README at high 3-D refinement.
+
+        `monolithic=False` is the placeholder for the matfree/fieldsplit
+        configuration ported from the electrolyte code. NOT YET IMPLEMENTED --
+        see notes/todo.md. Do the memory benchmark before deciding whether we
+        need it in 2-D at all.
+        """
+        if not monolithic:
+            raise NotImplementedError(
+                "fieldsplit configuration not yet ported from the electrolyte code")
+
+        return {"snes_type": "newtonls",
+                "snes_atol": self.newton_atol,
+                "snes_rtol": 0.0,
+                "snes_max_it": self.newton_max_it,
+                "snes_linesearch_type": "basic",
+                "snes_monitor": None,
+                "ksp_type": "preonly",
+                "pc_type": "lu",
+                "pc_factor_mat_solver_type": "mumps",
+                "mat_mumps_icntl_14": 120,
+                "mat_mumps_icntl_24": 0}
+
+    def check_constraints(self, sln, tol=1e-7):
+        """Verify the three integral constraints actually hold.
+
+        The original asserts exactly these after its Woodbury update. If our
+        reformulation is right, they hold here too.
+        """
+        _, _, _, _, _, p, x_1, x_2, _, _, _, l_p = sln.subfunctions
+        _, c_1, c_2 = self.conc_relation(x_1, x_2, p + l_p)
+
+        errs = {
+            "int_c_1": abs(assemble(c_1 * self.dx) - float(self.c_1_integral)),
+            "int_c_2": abs(assemble(c_2 * self.dx) - float(self.c_2_integral)),
+            "int_mfs": abs(assemble((x_1 + x_2) * self.dx) - float(self.mfs_integral)),
+        }
+        for name, err in errs.items():
+            if err > tol:
+                raise RuntimeError(f"constraint {name} violated: {err:.3e} > {tol:.1e}")
+        return errs
+
+    def errors(self, sln):
+        """L^2 errors against the manufactured solution."""
+        mm_1, mm_2, v, mu_1, mu_2, p, x_1, x_2, rho_inv, l_1, l_2, l_p = sln.subfunctions
+
+        def l2(a, b):
+            return sqrt(assemble(inner(a - b, a - b) * self.dx))
+
+        return {
+            "mu_1": l2(self.mu_1_ms, mu_1 + l_1),
+            "mu_2": l2(self.mu_2_ms, mu_2 + l_2),
+            "grad_mu_1": l2(grad(self.mu_1_ms), grad(mu_1)),
+            "grad_mu_2": l2(grad(self.mu_2_ms), grad(mu_2)),
+            "p": l2(self.p_ms, p + l_p),
+            "grad_p": l2(grad(self.p_ms), grad(p)),
+            "mm_1": l2(self.mm_1_ms, mm_1),
+            "mm_2": l2(self.mm_2_ms, mm_2),
+            "div_mm_1": l2(div(self.mm_1_ms), div(mm_1)),
+            "div_mm_2": l2(div(self.mm_2_ms), div(mm_2)),
+            "v": l2(self.v_ms, v),
+            "grad_v": l2(grad(self.v_ms), grad(v)),
+            "x_1": l2(self.x_1_ms, x_1),
+            "x_2": l2(self.x_2_ms, x_2),
+        }
+
+
+# ---------------------------------------------------------------------------
+# Driver
+# ---------------------------------------------------------------------------
+
+def solve_forward(problem, D_12=None, sln=None, monolithic=True, check=True):
+    """Solve the nonlinear SOSM system for a given D_12.
+
+    Parameters
+    ----------
+    problem : SOSMProblem
+    D_12    : float, optional. If given, overwrites `problem.D_12` first.
+              Leave as None when D_12 is an active pyadjoint Control.
+    sln     : Function, optional. Initial guess; defaults to the projected
+              manufactured solution. Pass the previous solution to warm-start
+              a continuation sweep.
+    check   : verify the integral constraints after solving.
+
+    Returns the solution Function on the mixed space.
+    """
+    if D_12 is not None:
+        problem.D_12.assign(D_12)
+
+    r_1_d, r_2_d = problem._fix_compatibility()
+
+    if sln is None:
+        sln = problem.initial_guess()
+
+    F = problem.residual(sln, r_1_d, r_2_d)
+    prob = NonlinearVariationalProblem(F, sln, bcs=problem.bcs())
+    solver = NonlinearVariationalSolver(
+        prob,
+        solver_parameters=problem.solver_parameters(monolithic=monolithic),
+        form_compiler_parameters={"quadrature_degree": problem.deg_max})
+
+    solver.solve()
+
+    if check:
+        problem.check_constraints(sln)
+
+    return sln

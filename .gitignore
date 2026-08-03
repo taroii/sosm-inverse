@@ -1,2 +1,21 @@
 # paper stuff
 paper/
+notes/
+
+# large run outputs
+runs/
+
+# source repos
+multicomponent_code/
+multicomponent_electrolyte_code/
+
+# Python
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+
+# Firedrake / PETSc artefacts
+*.pvd
+*.vtu
+*.pvtu
+*.h5

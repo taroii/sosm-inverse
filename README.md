@@ -15,20 +15,40 @@ These results must occur in a setting that has cross-diffusion and a concentrati
 
 ## II. Getting Started
 
-Create a fresh environment and install the Python dependencies:
+The forward model is built on [Firedrake](https://www.firedrakeproject.org), which is not
+installable with `pip install -r requirements.txt` — it builds its own PETSc. Create the
+environment, then follow Firedrake's own
+[install instructions](https://www.firedrakeproject.org/install.html) inside it:
 
 ```bash
-conda create -n sosm-inverse python=3.11
+conda create -n sosm-inverse python=3.11   # check the version against the install page
 conda activate sosm-inverse
-pip install -r requirements.txt
+# ... Firedrake install, per the link above ...
 ```
 
-Clone repository dependencies:
+Firedrake must be built with [Netgen](https://www.firedrakeproject.org/demos/netgen_mesh.py.html)
+and [Irksome](https://www.firedrakeproject.org/Irksome/) support to run the reference
+implementations; `tabulate` is also required. `pyadjoint` needs no separate install — it
+ships with Firedrake as `firedrake.adjoint`.
+
+Verify the install before running anything, in particular that MPI is not duplicated:
 
 ```bash
-git clone https://bitbucket.org/abaierr/multicomponent_code.git 
+python -c "from firedrake import *; print('ok')"
+mpiexec -n 2 python -c "from mpi4py import MPI; print(MPI.COMM_WORLD.rank)"
+```
+
+The second command must print `0` and `1`. Two zeros means two MPI stacks are linked into
+the same process, and every subsequent "parallel" run will silently be serial.
+
+(Optional) Clone the two reference implementations:
+
+```bash
+git clone https://bitbucket.org/abaierr/multicomponent_code.git
 git clone https://bitbucket.org/abaierr/multicomponent_electrolyte_code.git
 ```
+
+These repositories contain the original code we build off of, but are unnecessary to obtain the results of our paper. I.e. this repository is fully self-contained and doesn't require cloning any other repositories. 
 
 ## III. System Specifications for Reported Runs
 
@@ -68,3 +88,36 @@ For all of the experiments and results we report in our paper, we use a dedicate
 - Cost becomes limiting in three dimensions, where each objective evaluation requires a full nonlinear solve.
 - The Onsager matrix degenerates as any $c_i$ approaches zero, so near-trace species will make the inverse problem ill-conditioned.
 - Positivity of the diffusivities and the semidefinite structure of $M$ must survive the parameter updates. The logarithmic reparameterization handles the first. The second requires attention once concentration-dependent diffusivities enter.
+
+## VI. References
+
+Our forward model is adapted from the following works of Baier-Reinio and coauthors,
+whose reference implementations are the two repositories cloned in §II. The SOSM
+discretization we invert is that of `doi:10.1137/25M1734385`; the constraint formulation
+we use to make the residual differentiable is taken from `arXiv:2510.14923`.
+
+```bibtex
+@article{baier2026high,
+  title   = {High-Order Finite Element Methods for Three-Dimensional
+             Multicomponent Convection-Diffusion},
+  author  = {Baier-Reinio, Aaron and Farrell, Patrick E.},
+  journal = {SIAM Journal on Scientific Computing},
+  volume  = {48},
+  number  = {2},
+  pages   = {A540--A567},
+  year    = {2026},
+  doi     = {10.1137/25M1734385}
+}
+
+@article{baier2025electroneutral,
+  title   = {Finite element methods for electroneutral multicomponent
+             electrolyte flows},
+  author  = {Baier-Reinio, Aaron and Farrell, Patrick E. and Monroe, Charles W.},
+  journal = {arXiv preprint arXiv:2510.14923},
+  year    = {2025}
+}
+```
+
+Archived software versions for the first paper are on Zenodo at
+[`10.5281/zenodo.16416180`](https://doi.org/10.5281/zenodo.16416180); code and data for
+its reported results are at <https://zenodo.org/records/16416181>.
