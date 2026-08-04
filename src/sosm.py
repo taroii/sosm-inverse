@@ -70,7 +70,8 @@ class SOSMProblem:
                  D_1=0.5, D_2=2.0, deg_max=15,
                  eta=1e-1, zeta=1e-1, gamma=1e1,
                  density_consistency=True, use_grad_rho_inv_exact=False,
-                 newton_atol=1e-10, newton_max_it=10):
+                 newton_atol=1e-10, newton_max_it=10,
+                 ksp_atol=1e-13, ksp_rtol=1e-13):
         assert d in (2, 3)
         assert mesh_type in ("tet", "hex")
 
@@ -83,6 +84,8 @@ class SOSMProblem:
         self.use_grad_rho_inv_exact = use_grad_rho_inv_exact
         self.newton_atol = newton_atol
         self.newton_max_it = newton_max_it
+        self.ksp_atol = ksp_atol
+        self.ksp_rtol = ksp_rtol
 
         self._build_mesh()
 
@@ -107,6 +110,14 @@ class SOSMProblem:
 
         self._build_manufactured_solution()
         self._build_spaces()
+
+        # Done ONCE, at construction, and cached. These depend only on the
+        # manufactured solution -- never on D_12 -- so recomputing them per
+        # solve is both wasteful and unsafe under pyadjoint: the projections
+        # would be taped on every replay, and T_1/T_2 are Constants that the
+        # flux Dirichlet BCs close over, so reassigning them mid-tape mutates
+        # the boundary data underneath a recorded solve.
+        self.r_1_d, self.r_2_d = self._fix_compatibility()
 
     # -- Mesh ---------------------------------------------------------------
 
@@ -291,9 +302,25 @@ class SOSMProblem:
         (u_1, u_2, u, w_1, w_2, q, y_1, y_2, r,
          t_1, t_2, t_p) = TestFunctions(self.Z)
 
-        # The augmented fields: the DG/CG part plus its real-space constant.
-        # These -- not the bare fields -- are the physical mu_1, mu_2, p, and
-        # they are what appears everywhere below.
+        # Augmented fields = the DG/CG part plus its real-space constant.
+        #
+        # CRITICAL: raw and augmented fields are NOT interchangeable, and which
+        # one goes where is what makes the Jacobian nonsingular. Compare the
+        # electrolyte code, which uses raw `p` in the Stokes operator
+        #     tot_res -= inner(p, div(u)) * dx
+        # but the augmented pressure in the constitutive matrix
+        #     X = mat_X(y_e_nm, p + l_p)
+        #
+        # The rule: **augmented fields only where an absolute thermodynamic
+        # value is required** (the equation of state and the chemical-potential
+        # law); **raw fields in the differential operators**, where only
+        # differences matter.
+        #
+        # Using the augmented field everywhere makes
+        #     (p, l_p) -> (p + c, l_p - c)
+        # an exact symmetry of the residual, and likewise for each mu_i. That
+        # is a three-dimensional nullspace and a singular Jacobian. The
+        # asymmetry below is what breaks it.
         mu_1_a = mu_1 + l_1
         mu_2_a = mu_2 + l_2
         p_a = p + l_p
@@ -315,10 +342,11 @@ class SOSMProblem:
                                u - (rho_inv * (u_1 + u_2))) * dx_
 
         # -- Driving forces and the Stokes pressure term.
-        B = (inner(p_a, (rho_inv * div(u_1 + u_2)) + dot(grad_rho_inv, u_1 + u_2))
-             - inner(p_a, div(u))) * dx_
-        B -= ((1.0 / M_1) * inner(mu_1_a, div(u_1))
-              + (1.0 / M_2) * inner(mu_2_a, div(u_2))) * dx_
+        # Operator terms: RAW p, mu_1, mu_2. See the note above.
+        B = (inner(p, (rho_inv * div(u_1 + u_2)) + dot(grad_rho_inv, u_1 + u_2))
+             - inner(p, div(u))) * dx_
+        B -= ((1.0 / M_1) * inner(mu_1, div(u_1))
+              + (1.0 / M_2) * inner(mu_2, div(u_2))) * dx_
 
         # -- Mass-average constraint and continuity.
         BT = (inner(q, (rho_inv * div(mm_1 + mm_2)) + dot(grad_rho_inv, mm_1 + mm_2))
@@ -385,34 +413,100 @@ class SOSMProblem:
 
     # -- Solver -------------------------------------------------------------
 
-    def solver_parameters(self, monolithic=True):
-        """Newton parameters.
+    def solver_parameters(self, monolithic=False):
+        """Newton parameters: matfree + Schur fieldsplit.
 
-        `monolithic=True` reproduces the original: a direct LU on the whole
-        mixed system. Correct, and the right choice for validation, but it is
-        the configuration responsible for the 1-2 TB figure in the original
-        README at high 3-D refinement.
+        A monolithic LU is NOT available here, and this is structural rather
+        than a tuning choice. Firedrake refuses to assemble a monolithic AIJ
+        matrix for a mixed space containing `"R"` blocks:
 
-        `monolithic=False` is the placeholder for the matfree/fieldsplit
-        configuration ported from the electrolyte code. NOT YET IMPLEMENTED --
-        see notes/todo.md. Do the memory benchmark before deciding whether we
-        need it in 2-D at all.
+            ValueError: Monolithic matrix assembly not supported for systems
+                        with R-space blocks
+
+        An `"R"` field couples to every degree of freedom, so its rows and
+        columns are dense, and a sparse monolithic format cannot represent
+        them. This is precisely the difficulty the original code met and
+        answered with the Woodbury identity plus hand-written PETSc: the dense
+        constraint rows were held outside the sparse matrix and folded back in
+        by a rank-3 update. Our reformulation keeps the constraints in the
+        form, so the same difficulty reappears here and has to be answered a
+        different way -- the electrolyte code's answer, which is to never
+        assemble the whole operator at all.
+
+        The configuration below is ported from
+        `multicomponent_electrolyte_code/unsteady_hull_cell_2d.py`. The matrix
+        is `matfree`; a Schur fieldsplit separates the nine PDE fields (split
+        0) from the three real-space constants (split 1). Split 0 is assembled
+        via `firedrake.AssembledPC` and handed to MUMPS -- so MUMPS still does
+        the heavy lifting, but on the sparse block only, never on the dense
+        constraint rows. Split 1 is tiny (3x3) and falls to a few GMRES
+        iterations.
+
+        A useful consequence: the memory profile is the electrolyte code's, not
+        the 1-2 TB monolithic one, because the LU never sees the full system.
         """
-        if not monolithic:
+        if monolithic:
             raise NotImplementedError(
-                "fieldsplit configuration not yet ported from the electrolyte code")
+                "monolithic LU cannot assemble R-space blocks; see this docstring")
+
+        n_fields = self.Z.num_sub_spaces()
+        n_pde = n_fields - self.num_lagrange_mults
+
+        split_0 = ",".join(str(i) for i in range(n_pde))
+        split_1 = ",".join(str(i) for i in range(n_pde, n_fields))
 
         return {"snes_type": "newtonls",
+                # "l2", not "basic". The electrolyte code chooses this with the
+                # comment "Prevent the fractions from becoming negative", and
+                # the same hazard is ours: the constitutive law evaluates
+                # ln(x_i * p), so a Newton step that overshoots x_i or p below
+                # zero produces NaN and kills the solve rather than recovering.
+                # The original used "basic", but it also ran its own
+                # convergence test inside the Woodbury callback.
+                "snes_linesearch_type": "l2",
+                "snes_monitor": "",
+                "snes_converged_reason": "",
                 "snes_atol": self.newton_atol,
                 "snes_rtol": 0.0,
+                "snes_stol": 0.0,
                 "snes_max_it": self.newton_max_it,
-                "snes_linesearch_type": "basic",
-                "snes_monitor": None,
-                "ksp_type": "preonly",
-                "pc_type": "lu",
-                "pc_factor_mat_solver_type": "mumps",
-                "mat_mumps_icntl_14": 120,
-                "mat_mumps_icntl_24": 0}
+
+                "mat_type": "matfree",
+                "ksp_type": "fgmres",
+                "ksp_gmres_cgs_refinement_type": "refine_always",
+                "ksp_atol": self.ksp_atol,
+                "ksp_rtol": self.ksp_rtol,
+                "ksp_converged_reason": "",
+
+                "pc_type": "fieldsplit",
+                "pc_fieldsplit_type": "schur",
+                "pc_fieldsplit_schur_fact_type": "full",
+                "pc_fieldsplit_0_fields": split_0,
+                "pc_fieldsplit_1_fields": split_1,
+
+                # Split 0: the nine PDE fields. Assembled, then MUMPS.
+                "fieldsplit_0": {
+                    "ksp_type": "preonly",
+                    "pc_type": "python",
+                    "pc_python_type": "firedrake.AssembledPC",
+                    "assembled": {
+                        "ksp_type": "gmres",
+                        "ksp_max_it": 3,
+                        "ksp_atol": self.ksp_atol,
+                        "ksp_rtol": self.ksp_rtol,
+                        "pc_type": "lu",
+                        "pc_factor_mat_solver_type": "mumps",
+                        "mat_mumps_icntl_14": 120,
+                    },
+                },
+
+                # Split 1: the three real-space constants. Tiny.
+                "fieldsplit_1": {
+                    "ksp_type": "gmres",
+                    "ksp_max_it": self.num_lagrange_mults,
+                    "ksp_atol": self.ksp_atol,
+                    "ksp_rtol": self.ksp_rtol,
+                }}
 
     def check_constraints(self, sln, tol=1e-7):
         """Verify the three integral constraints actually hold.
@@ -462,7 +556,7 @@ class SOSMProblem:
 # Driver
 # ---------------------------------------------------------------------------
 
-def solve_forward(problem, D_12=None, sln=None, monolithic=True, check=True):
+def solve_forward(problem, D_12=None, sln=None, monolithic=False, check=True):
     """Solve the nonlinear SOSM system for a given D_12.
 
     Parameters
@@ -480,12 +574,11 @@ def solve_forward(problem, D_12=None, sln=None, monolithic=True, check=True):
     if D_12 is not None:
         problem.D_12.assign(D_12)
 
-    r_1_d, r_2_d = problem._fix_compatibility()
-
+    # r_1_d, r_2_d, T_1, T_2 were computed once at construction -- see __init__.
     if sln is None:
         sln = problem.initial_guess()
 
-    F = problem.residual(sln, r_1_d, r_2_d)
+    F = problem.residual(sln, problem.r_1_d, problem.r_2_d)
     # form_compiler_parameters belongs on the problem, not the solver.
     prob = NonlinearVariationalProblem(
         F, sln, bcs=problem.bcs(),
