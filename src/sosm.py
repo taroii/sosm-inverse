@@ -486,11 +486,13 @@ def solve_forward(problem, D_12=None, sln=None, monolithic=True, check=True):
         sln = problem.initial_guess()
 
     F = problem.residual(sln, r_1_d, r_2_d)
-    prob = NonlinearVariationalProblem(F, sln, bcs=problem.bcs())
+    # form_compiler_parameters belongs on the problem, not the solver.
+    prob = NonlinearVariationalProblem(
+        F, sln, bcs=problem.bcs(),
+        form_compiler_parameters={"quadrature_degree": problem.deg_max})
     solver = NonlinearVariationalSolver(
         prob,
-        solver_parameters=problem.solver_parameters(monolithic=monolithic),
-        form_compiler_parameters={"quadrature_degree": problem.deg_max})
+        solver_parameters=problem.solver_parameters(monolithic=monolithic))
 
     solver.solve()
 
