@@ -94,12 +94,20 @@ def main():
         PETSc.Sys.Print(f"adjoint dJ/dD  = {g_adj:.8e}\n", flush=True)
 
         # -- Centered finite differences, tape off. -------------------------
+        # The control is an "R"-space Function, so Jhat must be re-evaluated at
+        # an "R"-space Function too -- passing a Constant does not match the
+        # control type.
+        def at(value):
+            f = Function(problem.R0)
+            f.assign(value)
+            return f
+
         pause_annotation()
         steps = np.logspace(-1, -8, 15)
         rows = []
         for eps in steps:
-            jp = float(Jhat(Constant(args.D_eval + eps)))
-            jm = float(Jhat(Constant(args.D_eval - eps)))
+            jp = float(Jhat(at(args.D_eval + eps)))
+            jm = float(Jhat(at(args.D_eval - eps)))
             g_fd = (jp - jm) / (2.0 * eps)
             rel = abs(g_fd - g_adj) / max(abs(g_adj), 1e-300)
             rows.append({"eps": eps, "g_fd": g_fd, "g_adj": g_adj, "rel_err": rel})
@@ -116,9 +124,12 @@ def main():
                             "Treat the adjoint gradient as unverified.", flush=True)
 
         # -- Also run Firedrake's own Taylor test, which is the stricter check.
+        # The FD loop above left the control at the last perturbed value; reset
+        # it so the Taylor test expands about D_eval, not D_eval - 1e-8.
         pause_annotation()
-        h = Function(problem.R0).assign(1.0)
-        rate = taylor_test(Jhat, problem.D_12, h)
+        h = Function(problem.R0)
+        h.assign(1.0)
+        rate = taylor_test(Jhat, at(args.D_eval), h)
         PETSc.Sys.Print(f"taylor_test convergence rate: {rate:.3f} "
                         f"(want ~2.0)", flush=True)
         continue_annotation()
