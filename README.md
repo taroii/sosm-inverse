@@ -15,31 +15,53 @@ These results must occur in a setting that has cross-diffusion and a concentrati
 
 ## II. Getting Started
 
-The forward model is built on [Firedrake](https://www.firedrakeproject.org), which is not
-installable with `pip install -r requirements.txt` — it builds its own PETSc. Create the
-environment, then follow Firedrake's own
-[install instructions](https://www.firedrakeproject.org/install.html) inside it:
+The forward model is built on [Firedrake](https://www.firedrakeproject.org) (Python 3.10 or
+greater), which compiles its own PETSc and so is not installable from a
+`requirements.txt`. Follow Firedrake's
+[install instructions](https://www.firedrakeproject.org/install.html), which install the
+system packages, build PETSc, and then install Firedrake into a virtual environment:
 
 ```bash
-conda create -n sosm-inverse python=3.11   # check the version against the install page
-conda activate sosm-inverse
-# ... Firedrake install, per the link above ...
+curl -O https://raw.githubusercontent.com/firedrakeproject/firedrake/main/scripts/firedrake-configure
+sudo apt install $(python3 firedrake-configure --show-system-packages)
+# ... build PETSc, per the link above ...
+python3 -m venv venv-firedrake
+. venv-firedrake/bin/activate
+export $(python3 firedrake-configure --show-env)
+pip install --no-binary h5py 'firedrake[check,netgen]'
+pip install matplotlib tabulate
 ```
 
-Firedrake must be built with [Netgen](https://www.firedrakeproject.org/demos/netgen_mesh.py.html)
-and [Irksome](https://www.firedrakeproject.org/Irksome/) support to run the reference
-implementations; `tabulate` is also required. `pyadjoint` needs no separate install — it
-ships with Firedrake as `firedrake.adjoint`.
+`pyadjoint` needs no separate install — it ships with Firedrake as `firedrake.adjoint`.
+[Irksome](https://www.firedrakeproject.org/Irksome/) is required only to run the
+reference implementations below, not for anything in this repository.
 
 Verify the install before running anything, in particular that MPI is not duplicated:
 
 ```bash
-python -c "from firedrake import *; print('ok')"
+firedrake-check
 mpiexec -n 2 python -c "from mpi4py import MPI; print(MPI.COMM_WORLD.rank)"
 ```
 
 The second command must print `0` and `1`. Two zeros means two MPI stacks are linked into
 the same process, and every subsequent "parallel" run will silently be serial.
+
+### Activating the environment
+
+Once installed, each new shell needs:
+
+```bash
+conda deactivate                              # only if a conda env is active
+. venv-firedrake/bin/activate
+export $(python3 firedrake-configure --show-env)
+```
+
+The `conda deactivate` matters: an active conda environment puts its `lib/` ahead of the
+system MPI and HDF5 that PETSc was compiled against. The `export` sets `PETSC_DIR` and
+`PETSC_ARCH`, which Firedrake needs to find PETSc when it compiles kernels at run time.
+
+Alternatively `source scripts/env.sh` does all three, plus the run settings used for the
+reported experiments.
 
 (Optional) Clone the two reference implementations:
 

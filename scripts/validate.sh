@@ -31,9 +31,21 @@ LOOPS=${LOOPS:-4}
 echo "=============================================================="
 echo " STEP 0 -- ground truth from the original implementation"
 echo "=============================================================="
-# Args: d k mesh_type picard_linearized N_mesh_initial n_loops
-/usr/bin/time -v python multicomponent_code/manufactured_solution.py \
-    "$D" "$K" tet False "$N0" "$LOOPS"
+# OPTIONAL. fig01 already measures error against the analytic manufactured
+# solution, so the port can be validated without this. Running the original
+# adds a comparison of error magnitudes rather than just rates, and -- the real
+# reason -- leaves a known-good implementation on the machine to A/B against if
+# STEP 1 comes out wrong.
+if [[ -f multicomponent_code/manufactured_solution.py ]]; then
+    # Args: d k mesh_type picard_linearized N_mesh_initial n_loops
+    /usr/bin/time -v python multicomponent_code/manufactured_solution.py \
+        "$D" "$K" tet False "$N0" "$LOOPS"
+else
+    echo " SKIPPED -- multicomponent_code/ not present."
+    echo " The gate still works: STEP 1 compares against the analytic solution."
+    echo " Clone it only if STEP 1 fails and you want something to A/B against:"
+    echo "   git clone https://bitbucket.org/abaierr/multicomponent_code.git"
+fi
 
 echo
 echo "=============================================================="
@@ -55,7 +67,7 @@ echo " production run, and it does many forward solves."
 echo
 echo "=============================================================="
 echo " Gate passed only if:"
-echo "   - STEP 1 rates match STEP 0 rates"
+echo "   - STEP 1 rates are ~= k  (and match STEP 0, if it ran)"
 echo "   - STEP 2 shows a V-shaped error curve and taylor_test ~= 2.0"
 echo " Record the outcome in notes/todo.md before moving on."
 echo "=============================================================="
