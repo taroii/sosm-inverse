@@ -70,24 +70,33 @@ def main():
 
     with Run("gradient-check", config, allow_dirty=args.allow_dirty) as run:
 
-        # -- Target field, generated at the true parameter, tape off. -------
+        # -- Everything that must NOT be taped. -----------------------------
+        # SOSMProblem.__init__ calls _fix_compatibility, which projects and then
+        # assigns to T_1/T_2. Those are Constants the flux Dirichlet BCs close
+        # over, so constructing the problem inside the annotated region would
+        # tape the projections and mutate boundary data underneath a recorded
+        # solve. Both problems are therefore built with annotation paused.
         pause_annotation()
+
         p_true = SOSMProblem(d=args.d, k=args.k, N_mesh=args.N)
         sln_true = solve_forward(p_true, D_12=args.D_true)
         target = Function(p_true.spaces["X_1"])
         target.assign(sln_true.subfunctions[6])
-        continue_annotation()
 
-        # -- Taped forward solve at D_eval. ---------------------------------
         problem = SOSMProblem(d=args.d, k=args.k, N_mesh=args.N)
         problem.D_12.assign(args.D_eval)
-        control = Control(problem.D_12)
 
+        continue_annotation()
+
+        # -- Taped from here: only the solve and the functional. ------------
+        control = Control(problem.D_12)
         sln = solve_forward(problem)
         J = misfit(problem, sln, target)
 
+        # derivative() returns a Cofunction in the dual of the control space,
+        # not a float; for an "R" control that is a single dof.
         Jhat = ReducedFunctional(J, control)
-        g_adj = float(Jhat.derivative())
+        g_adj = float(Jhat.derivative().dat.data_ro[0])
         J0 = float(J)
 
         PETSc.Sys.Print(f"\nJ(D_eval)      = {J0:.8e}", flush=True)

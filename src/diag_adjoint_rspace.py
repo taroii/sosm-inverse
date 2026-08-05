@@ -14,19 +14,32 @@ If that combination does not work, no amount of fixing the SOSM gauge question
 saves the approach. Better to find out on a thirty-line Poisson problem than
 after the SOSM formulation is settled.
 
-The test problem is the minimal analogue of our structure: Neumann Poisson,
+The test problem is Neumann Poisson,
 
     -D laplacian(u) = f   in Omega,    du/dn = 0,    int u = 0
 
-whose constant nullspace is removed by an R-space multiplier in exactly the
-saddle-point form proposed as the fix for the SOSM gauge problem
-(see open_problems.md item 1):
+whose constant nullspace is removed by an R-space multiplier:
 
     res += lam * v * dx      # multiplier in u's own equation
     res += u * t * dx        # the constraint
 
-So a pass here is evidence for two separate things: that the toolchain supports
-what we need, and that this particular way of attaching multipliers is sound.
+SCOPE -- read this before quoting a pass. This tests the TOOLCHAIN only. It is
+not evidence about the SOSM formulation.
+
+An earlier version of this docstring claimed the attachment above was the same
+one proposed for SOSM, so that a pass would support both. That was wrong.
+Corollary 2.7 of paper/template.tex disproves the analogous SOSM attachment: in
+the SOSM constitutive block the two terms shift by +t*int(y_1) and -t*int(y_1)
+and cancel, so a multiplier there is unconstrained. No such cancellation exists
+here, because Poisson has a single PDE block whose constant nullspace genuinely
+lives in u's own equation. The formulation below is correct FOR THIS PROBLEM and
+says nothing about where multipliers belong in SOSM -- for that, see Theorem 2.9,
+which puts them in the conservation block (w_1, w_2, q).
+
+What a pass does establish, which is still worth having: that "R" blocks,
+matfree, a Schur fieldsplit with MUMPS on the PDE block, and an R-space Control
+all work together under firedrake.adjoint. None of that depends on where the
+multiplier sits, so the result transfers even though the formulation does not.
 
 We invert for the scalar diffusivity D, which is the same shape of inverse
 problem as recovering D_12.
@@ -134,8 +147,13 @@ def main():
     u = split(z)[0]
     J = assemble(0.5 * inner(u - target, u - target) * dx)
 
+    # Jhat.derivative() returns a Cofunction in the dual of the control space,
+    # not a float. For an "R" control that is a single dof, so read it out
+    # directly. Note the Riesz map for "R" carries a factor |Omega|, which is 1
+    # on the unit square -- and any such factor would show up immediately as a
+    # constant ratio against the finite differences below.
     Jhat = ReducedFunctional(J, control)
-    g_adj = float(Jhat.derivative())
+    g_adj = float(Jhat.derivative().dat.data_ro[0])
 
     PETSc.Sys.Print(f"\nJ(D_eval)     = {float(J):.8e}")
     PETSc.Sys.Print(f"adjoint dJ/dD = {g_adj:.8e}")

@@ -48,11 +48,77 @@ SHIFTS = [
 ]
 
 
-def residual_norm(problem, sln):
+def residual_norms(problem, sln):
+    """Return (norm without BCs, norm with BCs applied).
+
+    The second is the one that matters, and getting this wrong gives a false
+    pass. Assembling without BCs leaves rows for the constrained flux and
+    velocity DOFs, and those rows DO respond to a shift in mu_i. But the solve
+    discards them. For the test functions that actually survive -- the
+    unconstrained RT basis functions, which have zero normal trace on the whole
+    boundary -- we have
+
+        int div(u_i) dx = oint u_i . n ds = 0
+
+    so the shift contributes nothing there. A symmetry can therefore be invisible
+    in the first number and present in the second.
+    """
     F = problem.residual(sln, problem.r_1_d, problem.r_2_d)
-    vec = assemble(F, form_compiler_parameters={"quadrature_degree": problem.deg_max})
-    with vec.dat.vec_ro as v:
-        return v.norm()
+    fcp = {"quadrature_degree": problem.deg_max}
+
+    raw = assemble(F, form_compiler_parameters=fcp)
+    with raw.dat.vec_ro as v:
+        n_raw = v.norm()
+
+    bc_applied = assemble(F, bcs=problem.bcs(), form_compiler_parameters=fcp)
+    with bc_applied.dat.vec_ro as v:
+        n_bc = v.norm()
+
+    return n_raw, n_bc
+
+
+def constant_row_test(problem, sln):
+    """Test Lemma 2.8: do the conservation rows vanish for constant test
+    functions?
+
+    This is the test that matters once the multipliers sit in the conservation
+    block. If those rows are genuinely degenerate, l_1, l_2, l_p occupy them and
+    the system is square. If they are not, the multipliers over-determine it.
+
+    The residual is linear in the test function, so pairing it with a chosen
+    test function is a dot product against the assembled Cofunction. We pick the
+    function that is 1 in one conservation slot and 0 everywhere else.
+
+    Both rows should vanish to ROUNDING, not to discretization error, because
+    the cancellations are exact at any state:
+
+      constant w_i:  -M_i^-1 int div(J_i) + int r_i
+                   = -M_i^-1 oint J_D,i.n + int r_i,  zero by the T_i scaling
+                     chosen in _fix_compatibility
+
+      constant q:    int div(Psi(J_1+J_2)) - int div(v)
+                     - oint (Psi(J_1+J_2) - v).n
+                   = 0 termwise, which is what the density consistency term is for
+
+    So a large value here indicts _fix_compatibility or the ds term specifically,
+    which is far more useful than a generic "Newton diverged".
+    """
+    F = problem.residual(sln, problem.r_1_d, problem.r_2_d)
+    R = assemble(F, form_compiler_parameters={"quadrature_degree": problem.deg_max})
+
+    # Scale to compare against: the largest entry of the assembled residual.
+    with R.dat.vec_ro as rv:
+        scale = max(rv.norm(), 1e-300)
+
+    out = {}
+    for label, slot in (("w_1 (continuity 1)", 3),
+                        ("w_2 (continuity 2)", 4),
+                        ("q   (mass average)", 5)):
+        phi = Function(problem.Z)
+        phi.subfunctions[slot].assign(1.0)
+        with R.dat.vec_ro as rv, phi.dat.vec_ro as pv:
+            out[label] = rv.dot(pv) / scale
+    return out
 
 
 def main():
@@ -66,10 +132,11 @@ def main():
     problem = SOSMProblem(d=args.d, k=args.k, N_mesh=args.N)
     base = problem.initial_guess()
 
-    ref = residual_norm(problem, base)
+    ref_raw, ref_bc = residual_norms(problem, base)
     PETSc.Sys.Print(f"\nmixed space has {problem.Z.num_sub_spaces()} fields, "
                     f"{problem.Z.dim()} dofs")
-    PETSc.Sys.Print(f"||F(U0)|| = {ref:.12e}\n")
+    PETSc.Sys.Print(f"||F(U0)||  no bcs = {ref_raw:.12e}")
+    PETSc.Sys.Print(f"||F(U0)||  bcs    = {ref_bc:.12e}   <-- the one that matters\n")
 
     singular = []
     for label, i_field, i_const in SHIFTS:
@@ -81,26 +148,56 @@ def main():
         subs[i_field].assign(subs[i_field] + Constant(args.c))
         subs[i_const].assign(subs[i_const] - Constant(args.c))
 
-        val = residual_norm(problem, shifted)
-        rel = abs(val - ref) / max(ref, 1e-300)
+        val_raw, val_bc = residual_norms(problem, shifted)
+        rel_raw = abs(val_raw - ref_raw) / max(ref_raw, 1e-300)
+        rel_bc = abs(val_bc - ref_bc) / max(ref_bc, 1e-300)
 
-        verdict = "SINGULAR -- exact symmetry" if rel < 1e-10 else "ok, symmetry broken"
-        if rel < 1e-10:
+        if rel_bc < 1e-10:
             singular.append(label)
+            verdict = "SINGULAR"
+        else:
+            verdict = "ok"
 
-        PETSc.Sys.Print(f"  {label}:  ||F|| = {val:.12e}   rel_change = {rel:.3e}"
-                        f"   {verdict}")
+        PETSc.Sys.Print(f"  {label}:  rel_change no bcs = {rel_raw:.3e}   "
+                        f"with bcs = {rel_bc:.3e}   {verdict}")
 
     PETSc.Sys.Print("")
     if singular:
-        PETSc.Sys.Print(f"RESULT: {len(singular)} singular direction(s): "
-                        f"{', '.join(singular)}")
-        PETSc.Sys.Print("The formulation is rank-deficient. The multipliers must be")
-        PETSc.Sys.Print("attached differently -- see notes/context.md section 9.")
+        PETSc.Sys.Print(f"RESULT: {len(singular)} singular direction(s) with bcs "
+                        f"applied: {', '.join(singular)}")
+        PETSc.Sys.Print("The formulation is rank-deficient. See open_problems.md item 1.")
     else:
-        PETSc.Sys.Print("RESULT: no exact symmetry found in the three shift directions.")
-        PETSc.Sys.Print("Necessary, not sufficient: Newton can still fail for other")
-        PETSc.Sys.Print("reasons, but the constants are at least determined.")
+        PETSc.Sys.Print("RESULT: no exact symmetry with bcs applied.")
+        PETSc.Sys.Print("Necessary, not sufficient -- Newton can still fail for other")
+        PETSc.Sys.Print("reasons, but the three constants are at least determined.")
+
+    PETSc.Sys.Print("\nIf the two columns disagree, trust the second: the first")
+    PETSc.Sys.Print("includes constrained rows that the solve throws away.")
+
+    # -- Lemma 2.8. The test that matters now the multipliers moved. ---------
+    PETSc.Sys.Print("\n=== constant-test rows of the conservation block ===")
+    PETSc.Sys.Print("(relative to ||F||; want ~1e-12 or below -- these cancel")
+    PETSc.Sys.Print(" exactly at any state, so discretization error is no excuse)")
+
+    rows = constant_row_test(problem, base)
+    bad = []
+    for label, val in rows.items():
+        ok = abs(val) < 1e-10
+        if not ok:
+            bad.append(label)
+        PETSc.Sys.Print(f"  {label}: {val:+.3e}   {'degenerate' if ok else 'NOT degenerate'}")
+
+    PETSc.Sys.Print("")
+    if bad:
+        PETSc.Sys.Print("RESULT: Lemma 2.8 FAILS for: " + ", ".join(bad))
+        PETSc.Sys.Print("Those rows are not degenerate, so the multipliers placed")
+        PETSc.Sys.Print("there over-determine the system. Suspect, in order:")
+        PETSc.Sys.Print("  w_i row -> _fix_compatibility / the T_i scaling")
+        PETSc.Sys.Print("  q   row -> the density consistency ds term or its sign")
+    else:
+        PETSc.Sys.Print("RESULT: Lemma 2.8 holds numerically. The conservation rows")
+        PETSc.Sys.Print("are degenerate for constant test functions, so the three")
+        PETSc.Sys.Print("multipliers have exactly the rows they need.")
 
 
 if __name__ == "__main__":

@@ -274,6 +274,13 @@ class SOSMProblem:
         Verbatim in effect from the original: T_i is chosen so that the
         integrated source matches the boundary flux at the discrete level.
         """
+        # Correct ONLY on the first call: g_1 = T_1 * mm_1_ms, so if T_1 has
+        # already been rescaled, aux_1 carries that factor and the new T_1
+        # divides by the old one. Compounds silently.
+        assert not getattr(self, "_compat_done", False), \
+            "_fix_compatibility called twice; T_1/T_2 would compound"
+        self._compat_done = True
+
         aux_1 = self._project(self.g_1, self.spaces["W_1"],
                               bcs=[DirichletBC(self.spaces["W_1"], self.g_1, self.bc_markers)])
         aux_2 = self._project(self.g_2, self.spaces["W_2"],
@@ -302,32 +309,35 @@ class SOSMProblem:
         (u_1, u_2, u, w_1, w_2, q, y_1, y_2, r,
          t_1, t_2, t_p) = TestFunctions(self.Z)
 
-        # Augmented fields = the DG/CG part plus its real-space constant.
+        # NO augmented fields. mu_1, mu_2, p are used raw everywhere, exactly
+        # as in the original -- its spaces already contain the constants, and
+        # it carries no separate scalar unknowns (verified: `Z_h` in
+        # manufactured_solution.py:300 has nine fields and its `R_h` is the
+        # CG density-reciprocal space, not a real-number space).
         #
-        # CRITICAL: raw and augmented fields are NOT interchangeable, and which
-        # one goes where is what makes the Jacobian nonsingular. Compare the
-        # electrolyte code, which uses raw `p` in the Stokes operator
-        #     tot_res -= inner(p, div(u)) * dx
-        # but the augmented pressure in the constitutive matrix
-        #     X = mat_X(y_e_nm, p + l_p)
+        # An earlier version formed mu_i + l_i and p + l_p and used those
+        # throughout. That makes (mu_i, l_i) -> (mu_i + c, l_i - c) an exact
+        # symmetry, hence a singular Jacobian. See open_problems.md item 1.
         #
-        # The rule: **augmented fields only where an absolute thermodynamic
-        # value is required** (the equation of state and the chemical-potential
-        # law); **raw fields in the differential operators**, where only
-        # differences matter.
+        # Instead l_1, l_2, l_p are multipliers occupying the degenerate rows
+        # of the conservation block: the rows tested by constant w_1, w_2, q.
         #
-        # Using the augmented field everywhere makes
-        #     (p, l_p) -> (p + c, l_p - c)
-        # an exact symmetry of the residual, and likewise for each mu_i. That
-        # is a three-dimensional nullspace and a singular Jacobian. The
-        # asymmetry below is what breaks it.
-        mu_1_a = mu_1 + l_1
-        mu_2_a = mu_2 + l_2
-        p_a = p + l_p
+        # Relation to the original, stated precisely. Verified at
+        # manufactured_solution.py:403-405 and :530-535, it zeroes
+        # `dof_index_in_mixed_space(Z_h, 3/4/5)` -- one NODAL row in each of the
+        # U_1, U_2, P blocks -- and writes our three integral constraints there.
+        # Same block, but a nodal row rather than the constant-test row, so the
+        # two eliminations are NOT identical by inspection. Proposition 2.11 of
+        # paper/template.tex proves they agree under the hypothesis that the
+        # conservation block has corank exactly one per field; that hypothesis is
+        # shared with the original, since discarding a nodal row from a block of
+        # corank two would leave the original singular too.
+        #
+        # At the solution l_1 = l_2 = l_p = 0; check_constraints asserts this.
 
         grad_rho_inv = grad(self.rho_inv_ms) if self.use_grad_rho_inv_exact else grad(rho_inv)
 
-        c_tot, c_1, c_2 = self.conc_relation(x_1, x_2, p_a)
+        c_tot, c_1, c_2 = self.conc_relation(x_1, x_2, p)
 
         # -- Stokes viscous terms.
         A_visc = 2.0 * eta * inner(sym(grad(v)), sym(grad(u))) * dx_
@@ -342,7 +352,6 @@ class SOSMProblem:
                                u - (rho_inv * (u_1 + u_2))) * dx_
 
         # -- Driving forces and the Stokes pressure term.
-        # Operator terms: RAW p, mu_1, mu_2. See the note above.
         B = (inner(p, (rho_inv * div(u_1 + u_2)) + dot(grad_rho_inv, u_1 + u_2))
              - inner(p, div(u))) * dx_
         B -= ((1.0 / M_1) * inner(mu_1, div(u_1))
@@ -357,8 +366,14 @@ class SOSMProblem:
         res = A_visc + A_osm + B + BT
 
         # -- Thermodynamic constitutive relation.
-        mu_1_cr, mu_2_cr = self.mu_relation(x_1, x_2, p_a)
-        res += (inner(mu_1_a - mu_1_cr, y_1) + inner(mu_2_a - mu_2_cr, y_2)) * dx_
+        mu_1_cr, mu_2_cr = self.mu_relation(x_1, x_2, p)
+        res += (inner(mu_1 - mu_1_cr, y_1) + inner(mu_2 - mu_2_cr, y_2)) * dx_
+
+        # -- Multipliers, in the conservation-block rows that go degenerate for
+        # constant test functions. NOT on y_1, y_2: the constitutive rows are
+        # pointwise and not degenerate, so a multiplier there would be
+        # unconstrained.
+        res += (l_1 * w_1 + l_2 * w_2 + l_p * q) * dx_
 
         # -- Density reciprocal.
         res += inner(1.0 / rho_inv, r) * dx_
@@ -403,8 +418,10 @@ class SOSMProblem:
         x_1.assign(self._project(self.x_1_ms, S["X_1"]))
         x_2.assign(self._project(self.x_2_ms, S["X_2"]))
         rho_inv.assign(self._project(self.rho_inv_ms, S["R"]))
-        # The constants start at zero: the projections above already carry the
-        # full field, so the split between (mu_i, l_i) starts all-in-mu_i.
+        # Multipliers start at zero, which is also their value at the solution.
+        # Re-checked after the raw-field change: the projections above are
+        # unaffected, since mu_i and p now carry the full field directly rather
+        # than a split against a constant.
         l_1.assign(0.0)
         l_2.assign(0.0)
         l_p.assign(0.0)
@@ -514,13 +531,20 @@ class SOSMProblem:
         The original asserts exactly these after its Woodbury update. If our
         reformulation is right, they hold here too.
         """
-        _, _, _, _, _, p, x_1, x_2, _, _, _, l_p = sln.subfunctions
-        _, c_1, c_2 = self.conc_relation(x_1, x_2, p + l_p)
+        _, _, _, _, _, p, x_1, x_2, _, l_1, l_2, l_p = sln.subfunctions
+        _, c_1, c_2 = self.conc_relation(x_1, x_2, p)
 
         errs = {
             "int_c_1": abs(assemble(c_1 * self.dx) - float(self.c_1_integral)),
             "int_c_2": abs(assemble(c_2 * self.dx) - float(self.c_2_integral)),
             "int_mfs": abs(assemble((x_1 + x_2) * self.dx) - float(self.mfs_integral)),
+            # The multipliers occupy rows that are degenerate only if the
+            # discrete compatibility condition and the density consistency term
+            # do their job. A nonzero multiplier at the solution means one of
+            # those is wrong -- it is a sharper check than the constraints.
+            "l_1": abs(float(l_1.dat.data_ro[0])),
+            "l_2": abs(float(l_2.dat.data_ro[0])),
+            "l_p": abs(float(l_p.dat.data_ro[0])),
         }
         for name, err in errs.items():
             if err > tol:
