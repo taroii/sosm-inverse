@@ -27,8 +27,23 @@ boundary. Our manufactured solution prescribes Dirichlet data on the whole
 boundary, so int div(u_i) = 0 identically and the same trick may buy nothing.
 This script settles it.
 
+Two tests, and the second is the one that matters now that the multipliers sit
+in the conservation block:
+
+  1. shift symmetry -- decisive in ONE direction only. An unchanged norm proves
+     singularity. A changed norm does not prove nonsingularity.
+  2. Lemma 2.8, the constant-test rows of the conservation block. These must
+     vanish to rounding at every configuration, since the cancellations are
+     exact rather than asymptotic.
+
+Both run over a sweep of (k, N_mesh, shift), because one configuration is an
+observation, not a result. An exact cancellation holds everywhere; an accidental
+near-zero does not, and a value that shrinks with N is discretization error
+masquerading as one.
+
 Usage:
-    python src/diag_nullspace.py            # k=2 on a 2x2 mesh, a few seconds
+    python src/diag_nullspace.py                    # the sweep
+    python src/diag_nullspace.py --single --k 2 --N 2
 """
 
 import argparse
@@ -121,83 +136,96 @@ def constant_row_test(problem, sln):
     return out
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--d", type=int, default=2, choices=(2, 3))
-    ap.add_argument("--k", type=int, default=2)
-    ap.add_argument("--N", type=int, default=2, help="cells per direction; keep tiny")
-    ap.add_argument("--c", type=float, default=0.25, help="shift magnitude")
-    args = ap.parse_args()
-
-    problem = SOSMProblem(d=args.d, k=args.k, N_mesh=args.N)
+def run_one(d, k, N, c, apply_bcs):
+    """One configuration. Returns (shift results, constant-row results)."""
+    problem = SOSMProblem(d=d, k=k, N_mesh=N)
     base = problem.initial_guess()
+    if apply_bcs:
+        for bc in problem.bcs():
+            bc.apply(base)
 
-    ref_raw, ref_bc = residual_norms(problem, base)
-    PETSc.Sys.Print(f"\nmixed space has {problem.Z.num_sub_spaces()} fields, "
-                    f"{problem.Z.dim()} dofs")
-    PETSc.Sys.Print(f"||F(U0)||  no bcs = {ref_raw:.12e}")
-    PETSc.Sys.Print(f"||F(U0)||  bcs    = {ref_bc:.12e}   <-- the one that matters\n")
+    _, ref_bc = residual_norms(problem, base)
 
-    singular = []
+    shifts = {}
     for label, i_field, i_const in SHIFTS:
         shifted = base.copy(deepcopy=True)
         subs = shifted.subfunctions
+        subs[i_field].assign(subs[i_field] + Constant(c))
+        subs[i_const].assign(subs[i_const] - Constant(c))
+        _, val_bc = residual_norms(problem, shifted)
+        shifts[label] = abs(val_bc - ref_bc) / max(ref_bc, 1e-300)
 
-        # Add c to the raw field, subtract c from its real-space constant, so
-        # the augmented combination (field + constant) is unchanged.
-        subs[i_field].assign(subs[i_field] + Constant(args.c))
-        subs[i_const].assign(subs[i_const] - Constant(args.c))
+    return shifts, constant_row_test(problem, base)
 
-        val_raw, val_bc = residual_norms(problem, shifted)
-        rel_raw = abs(val_raw - ref_raw) / max(ref_raw, 1e-300)
-        rel_bc = abs(val_bc - ref_bc) / max(ref_bc, 1e-300)
 
-        if rel_bc < 1e-10:
-            singular.append(label)
-            verdict = "SINGULAR"
-        else:
-            verdict = "ok"
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--d", type=int, default=2, choices=(2, 3))
+    ap.add_argument("--c", type=float, default=0.25, help="shift magnitude")
+    ap.add_argument("--single", action="store_true",
+                    help="one configuration only, instead of the sweep")
+    ap.add_argument("--k", type=int, default=2)
+    ap.add_argument("--N", type=int, default=2, help="cells per direction")
+    args = ap.parse_args()
 
-        PETSc.Sys.Print(f"  {label}:  rel_change no bcs = {rel_raw:.3e}   "
-                        f"with bcs = {rel_bc:.3e}   {verdict}")
-
-    PETSc.Sys.Print("")
-    if singular:
-        PETSc.Sys.Print(f"RESULT: {len(singular)} singular direction(s) with bcs "
-                        f"applied: {', '.join(singular)}")
-        PETSc.Sys.Print("The formulation is rank-deficient. See open_problems.md item 1.")
+    # A single configuration is one observation. An exact cancellation must hold
+    # at EVERY mesh size, polynomial degree and shift magnitude; an accidental
+    # near-zero will not. The sweep is what separates the two, and it costs
+    # seconds because every configuration here is tiny.
+    if args.single:
+        configs = [(args.k, args.N, args.c)]
     else:
-        PETSc.Sys.Print("RESULT: no exact symmetry with bcs applied.")
-        PETSc.Sys.Print("Necessary, not sufficient -- Newton can still fail for other")
-        PETSc.Sys.Print("reasons, but the three constants are at least determined.")
+        configs = [(k, N, c)
+                   for k in (2, 3)
+                   for N in (2, 3, 4)
+                   for c in (0.25, 1.0)]
 
-    PETSc.Sys.Print("\nIf the two columns disagree, trust the second: the first")
-    PETSc.Sys.Print("includes constrained rows that the solve throws away.")
+    PETSc.Sys.Print(f"\nsweeping {len(configs)} configurations "
+                    f"(k, N_mesh, shift), d={args.d}\n")
 
-    # -- Lemma 2.8. The test that matters now the multipliers moved. ---------
-    PETSc.Sys.Print("\n=== constant-test rows of the conservation block ===")
-    PETSc.Sys.Print("(relative to ||F||; want ~1e-12 or below -- these cancel")
-    PETSc.Sys.Print(" exactly at any state, so discretization error is no excuse)")
+    rows_all, shifts_all = [], []
+    for (k, N, c) in configs:
+        shifts, rows = run_one(args.d, k, N, c, apply_bcs=True)
+        rows_all.append(((k, N, c), rows))
+        shifts_all.append(((k, N, c), shifts))
+        tag = f"k={k} N={N} c={c}"
+        row_str = "  ".join(f"{lbl.split()[0]}={v:+.2e}" for lbl, v in rows.items())
+        PETSc.Sys.Print(f"  {tag:16s} conservation rows: {row_str}")
 
-    rows = constant_row_test(problem, base)
-    bad = []
-    for label, val in rows.items():
-        ok = abs(val) < 1e-10
-        if not ok:
-            bad.append(label)
-        PETSc.Sys.Print(f"  {label}: {val:+.3e}   {'degenerate' if ok else 'NOT degenerate'}")
+    # -- Verdicts across the whole sweep. ------------------------------------
+    PETSc.Sys.Print("\n=== Lemma 2.8, across all configurations ===")
+    worst = {}
+    for _, rows in rows_all:
+        for lbl, v in rows.items():
+            worst[lbl] = max(worst.get(lbl, 0.0), abs(v))
+
+    failed = [lbl for lbl, v in worst.items() if v > 1e-10]
+    for lbl, v in worst.items():
+        PETSc.Sys.Print(f"  {lbl}: worst |value| = {v:.3e}   "
+                        f"{'degenerate' if v <= 1e-10 else 'NOT degenerate'}")
 
     PETSc.Sys.Print("")
-    if bad:
-        PETSc.Sys.Print("RESULT: Lemma 2.8 FAILS for: " + ", ".join(bad))
-        PETSc.Sys.Print("Those rows are not degenerate, so the multipliers placed")
-        PETSc.Sys.Print("there over-determine the system. Suspect, in order:")
+    if failed:
+        PETSc.Sys.Print("RESULT: Lemma 2.8 FAILS for: " + ", ".join(failed))
         PETSc.Sys.Print("  w_i row -> _fix_compatibility / the T_i scaling")
         PETSc.Sys.Print("  q   row -> the density consistency ds term or its sign")
+        PETSc.Sys.Print("A value that shrinks with N is discretization error, not an")
+        PETSc.Sys.Print("exact cancellation, and still means the row is not degenerate.")
     else:
-        PETSc.Sys.Print("RESULT: Lemma 2.8 holds numerically. The conservation rows")
-        PETSc.Sys.Print("are degenerate for constant test functions, so the three")
-        PETSc.Sys.Print("multipliers have exactly the rows they need.")
+        PETSc.Sys.Print("RESULT: Lemma 2.8 holds at every configuration tested.")
+        PETSc.Sys.Print("Still an observation, not a proof -- but an accidental")
+        PETSc.Sys.Print("cancellation across all of these would be a strange accident.")
+
+    PETSc.Sys.Print("\n=== shift symmetry, worst case across sweep ===")
+    worst_shift = {}
+    for _, shifts in shifts_all:
+        for lbl, v in shifts.items():
+            worst_shift[lbl] = min(worst_shift.get(lbl, np.inf), v)
+    for lbl, v in worst_shift.items():
+        PETSc.Sys.Print(f"  {lbl}: smallest rel_change = {v:.3e}   "
+                        f"{'SINGULAR' if v < 1e-10 else 'ok'}")
+    PETSc.Sys.Print("\nReminder: a changed norm is NOT proof of nonsingularity.")
+    PETSc.Sys.Print("It only rules out this particular family of symmetries.")
 
 
 if __name__ == "__main__":
