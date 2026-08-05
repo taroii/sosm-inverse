@@ -64,7 +64,14 @@ is there to remove. This is the piece that most needs a second pair of eyes.
 
 The whole point of the reformulation is that `firedrake.adjoint` can record the
 solve. That has never been tested. `src/fig02_gradient_check.py` tests it against
-centered differences and `taylor_test`. Blocked behind item 1.
+centered differences and `taylor_test`, but is blocked behind item 1.
+
+`src/diag_adjoint_rspace.py` tests the same premise on a Neumann Poisson problem
+and is NOT blocked. It exercises the four things that must work together --
+`"R"` block in a mixed space, `matfree`, Schur fieldsplit with MUMPS on the PDE
+block, and an R-space Control -- on a problem small enough to debug. It also uses
+the saddle-point attachment proposed in item 1, so a pass is evidence for that
+formulation too.
 
 Known constraint: `Function.at()` is not tapeable, so sparse point observations
 have to go through `VertexOnlyMesh` interpolation. Not yet written -- `fig02`
