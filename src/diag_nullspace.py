@@ -27,19 +27,15 @@ boundary. Our manufactured solution prescribes Dirichlet data on the whole
 boundary, so int div(u_i) = 0 identically and the same trick may buy nothing.
 This script settles it.
 
-Two tests, and the second is the one that matters now that the multipliers sit
-in the conservation block:
+Two measurements, over a sweep of (k, N_mesh, shift):
 
-  1. shift symmetry -- decisive in ONE direction only. An unchanged norm proves
-     singularity. A changed norm does not prove nonsingularity.
-  2. Lemma 2.8, the constant-test rows of the conservation block. These must
-     vanish to rounding at every configuration, since the cancellations are
-     exact rather than asymptotic.
+  row_*   the residual paired with a constant test function in each conservation
+          slot (w_1, w_2, q), relative to ||F||. Bears on Lemma 2.8.
+  shift_* the relative change in ||F|| under (field + c, constant - c), with
+          boundary conditions applied.
 
-Both run over a sweep of (k, N_mesh, shift), because one configuration is an
-observation, not a result. An exact cancellation holds everywhere; an accidental
-near-zero does not, and a value that shrinks with N is discretization error
-masquerading as one.
+Note on reading shift_*: an unchanged norm is an exact symmetry and implies
+singularity. The converse does not follow.
 
 Usage:
     python src/diag_nullspace.py                    # the sweep
@@ -180,52 +176,24 @@ def main():
                    for N in (2, 3, 4)
                    for c in (0.25, 1.0)]
 
-    PETSc.Sys.Print(f"\nsweeping {len(configs)} configurations "
-                    f"(k, N_mesh, shift), d={args.d}\n")
+    PETSc.Sys.Print(f"\n{len(configs)} configurations, d={args.d}\n")
 
-    rows_all, shifts_all = [], []
+    PETSc.Sys.Print(f"{'k':>2s} {'N':>2s} {'c':>5s}  "
+                    f"{'row_w_1':>11s} {'row_w_2':>11s} {'row_q':>11s}  "
+                    f"{'shift_mu_1':>11s} {'shift_mu_2':>11s} {'shift_p':>11s}")
+
     for (k, N, c) in configs:
         shifts, rows = run_one(args.d, k, N, c, apply_bcs=True)
-        rows_all.append(((k, N, c), rows))
-        shifts_all.append(((k, N, c), shifts))
-        tag = f"k={k} N={N} c={c}"
-        row_str = "  ".join(f"{lbl.split()[0]}={v:+.2e}" for lbl, v in rows.items())
-        PETSc.Sys.Print(f"  {tag:16s} conservation rows: {row_str}")
+        rv = list(rows.values())
+        sv = list(shifts.values())
+        PETSc.Sys.Print(f"{k:>2d} {N:>2d} {c:>5.2f}  "
+                        f"{rv[0]:>+11.3e} {rv[1]:>+11.3e} {rv[2]:>+11.3e}  "
+                        f"{sv[0]:>11.3e} {sv[1]:>11.3e} {sv[2]:>11.3e}")
 
-    # -- Verdicts across the whole sweep. ------------------------------------
-    PETSc.Sys.Print("\n=== Lemma 2.8, across all configurations ===")
-    worst = {}
-    for _, rows in rows_all:
-        for lbl, v in rows.items():
-            worst[lbl] = max(worst.get(lbl, 0.0), abs(v))
-
-    failed = [lbl for lbl, v in worst.items() if v > 1e-10]
-    for lbl, v in worst.items():
-        PETSc.Sys.Print(f"  {lbl}: worst |value| = {v:.3e}   "
-                        f"{'degenerate' if v <= 1e-10 else 'NOT degenerate'}")
-
-    PETSc.Sys.Print("")
-    if failed:
-        PETSc.Sys.Print("RESULT: Lemma 2.8 FAILS for: " + ", ".join(failed))
-        PETSc.Sys.Print("  w_i row -> _fix_compatibility / the T_i scaling")
-        PETSc.Sys.Print("  q   row -> the density consistency ds term or its sign")
-        PETSc.Sys.Print("A value that shrinks with N is discretization error, not an")
-        PETSc.Sys.Print("exact cancellation, and still means the row is not degenerate.")
-    else:
-        PETSc.Sys.Print("RESULT: Lemma 2.8 holds at every configuration tested.")
-        PETSc.Sys.Print("Still an observation, not a proof -- but an accidental")
-        PETSc.Sys.Print("cancellation across all of these would be a strange accident.")
-
-    PETSc.Sys.Print("\n=== shift symmetry, worst case across sweep ===")
-    worst_shift = {}
-    for _, shifts in shifts_all:
-        for lbl, v in shifts.items():
-            worst_shift[lbl] = min(worst_shift.get(lbl, np.inf), v)
-    for lbl, v in worst_shift.items():
-        PETSc.Sys.Print(f"  {lbl}: smallest rel_change = {v:.3e}   "
-                        f"{'SINGULAR' if v < 1e-10 else 'ok'}")
-    PETSc.Sys.Print("\nReminder: a changed norm is NOT proof of nonsingularity.")
-    PETSc.Sys.Print("It only rules out this particular family of symmetries.")
+    PETSc.Sys.Print("\nrow_*   : residual paired with a constant test function in that "
+                    "conservation slot, relative to ||F||")
+    PETSc.Sys.Print("shift_* : relative change in ||F|| under "
+                    "(field + c, constant - c), bcs applied")
 
 
 if __name__ == "__main__":

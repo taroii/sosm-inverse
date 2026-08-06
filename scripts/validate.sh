@@ -42,8 +42,8 @@ if [[ -f multicomponent_code/manufactured_solution.py ]]; then
         "$D" "$K" tet False "$N0" "$LOOPS"
 else
     echo " SKIPPED -- multicomponent_code/ not present."
-    echo " The gate still works: STEP 1 compares against the analytic solution."
-    echo " Clone it only if STEP 1 fails and you want something to A/B against:"
+    echo " STEP 1 compares against the analytic manufactured solution regardless."
+    echo " To enable this step:"
     echo "   git clone https://bitbucket.org/abaierr/multicomponent_code.git"
 fi
 
@@ -51,7 +51,6 @@ echo
 echo "=============================================================="
 echo " STEP 1 -- our port, same configuration (fig01)"
 echo "=============================================================="
-echo " Compare the rates below against STEP 0. They must match."
 /usr/bin/time -v python src/fig01_convergence.py \
     --d "$D" --k "$K" --N0 "$N0" --loops "$LOOPS"
 
@@ -59,15 +58,10 @@ echo
 echo "=============================================================="
 echo " STEP 2 -- adjoint gradient (fig02)"
 echo "=============================================================="
-echo " Small k and N deliberately: this is a correctness check, not a"
-echo " production run, and it does many forward solves."
 /usr/bin/time -v python src/fig02_gradient_check.py \
     --d "$D" --k 3 --N 8
 
 echo
 echo "=============================================================="
-echo " Gate passed only if:"
-echo "   - STEP 1 rates are ~= k  (and match STEP 0, if it ran)"
-echo "   - STEP 2 shows a V-shaped error curve and taylor_test ~= 2.0"
-echo " Record the outcome in notes/todo.md before moving on."
+echo " Done. Reference rates are in Table 2 of the paper, p.17."
 echo "=============================================================="

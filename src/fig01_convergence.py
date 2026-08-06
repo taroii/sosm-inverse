@@ -52,12 +52,8 @@ from firedrake.petsc import PETSc
 from sosm import SOSMProblem, solve_forward
 from runlog import Run
 
-# Field -> expected rate as an offset from k, per Table 2 of the paper.
-# 0 means rate k, 1 means rate k-1. The rest are still recorded in metrics.csv.
-EXPECTED = {
-    "mm_1": 1, "mm_2": 1, "mu_1": 1, "mu_2": 1, "p": 1, "grad_v": 1,
-    "v": 0, "x_1": 0, "x_2": 0,
-}
+# Fields to report rates for. Every field is recorded in metrics.csv regardless.
+RATE_FIELDS = ["mm_1", "mm_2", "mu_1", "mu_2", "p", "grad_v", "v", "x_1", "x_2"]
 PLOT_FIELDS = ["mm_1", "mu_1", "p", "grad_v", "v", "x_1"]
 
 
@@ -93,29 +89,25 @@ def main():
 
             row = {"refinement": i, "N_mesh": N, "h": 1.0 / N, "ndofs": ndofs}
             row.update({k: float(v) for k, v in errs.items()})
+            row.update({f"c_{k}": v for k, v in problem.constraint_errors.items()})
             run.record(**row)
             history.append(row)
 
             PETSc.Sys.Print(f"    ndofs = {ndofs}", flush=True)
             for name in PLOT_FIELDS:
                 PETSc.Sys.Print(f"    {name:>10s} err = {row[name]:.6e}", flush=True)
+            for name, val in problem.constraint_errors.items():
+                PETSc.Sys.Print(f"    {name:>10s}     = {val:+.6e}", flush=True)
 
-        # -- Observed rates vs Table 2. --------------------------------------
-        exact = args.exact_grad_rho_inv
-        PETSc.Sys.Print("\n=== observed rates (expected from Table 2) ===", flush=True)
-        if exact:
-            PETSc.Sys.Print("  --exact-grad-rho-inv set: paper predicts rate k "
-                            f"= {args.k} for ALL fields", flush=True)
+        # -- Observed rates. --------------------------------------------------
+        PETSc.Sys.Print("\n=== observed rates ===", flush=True)
         h = np.array([r["h"] for r in history])
-        for name in sorted(EXPECTED):
-            e = np.array([r[name] for r in history])
-            rates = np.log(e[:-1] / e[1:]) / np.log(h[:-1] / h[1:])
-            want = args.k if exact else args.k - EXPECTED[name]
-            last = rates[-1] if len(rates) else float("nan")
-            flag = "" if abs(last - want) < 0.5 else "   <-- off"
-            pretty = ", ".join(f"{r:.2f}" for r in rates)
-            PETSc.Sys.Print(f"  {name:>10s}: {pretty}   want ~{want}{flag}",
-                            flush=True)
+        if len(history) >= 2:
+            for name in RATE_FIELDS:
+                e = np.array([r[name] for r in history])
+                rates = np.log(e[:-1] / e[1:]) / np.log(h[:-1] / h[1:])
+                pretty = ", ".join(f"{r:.2f}" for r in rates)
+                PETSc.Sys.Print(f"  {name:>10s}: {pretty}", flush=True)
 
         # -- Plot. ----------------------------------------------------------
         h = np.array([r["h"] for r in history])

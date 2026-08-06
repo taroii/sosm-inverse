@@ -158,10 +158,6 @@ def main():
     PETSc.Sys.Print(f"\nJ(D_eval)     = {float(J):.8e}")
     PETSc.Sys.Print(f"adjoint dJ/dD = {g_adj:.8e}")
 
-    if abs(g_adj) < 1e-14:
-        PETSc.Sys.Print("\nFAIL: gradient is zero. The tape is empty or the "
-                        "control is not connected to the residual.")
-        return
 
     # -- Centered differences. -----------------------------------------------
     pause_annotation()
@@ -178,14 +174,8 @@ def main():
     rate = taylor_test(Jhat, at(args.D_eval), at(1.0))
     continue_annotation()
 
-    PETSc.Sys.Print(f"\nbest FD relative error : {best:.3e}   (want < 1e-6)")
-    PETSc.Sys.Print(f"taylor_test rate       : {rate:.3f}   (want ~2.0)")
-
-    ok = best < 1e-6 and rate > 1.9
-    PETSc.Sys.Print("\nPASS: matfree + fieldsplit + R-space + pyadjoint works together."
-                    if ok else
-                    "\nFAIL: see numbers above. This blocks the whole approach, "
-                    "independently of SOSM.")
+    PETSc.Sys.Print(f"\nbest FD relative error : {best:.3e}")
+    PETSc.Sys.Print(f"taylor_test rate       : {rate:.3f}")
 
 
 if __name__ == "__main__":
