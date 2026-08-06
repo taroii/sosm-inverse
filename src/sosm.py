@@ -551,7 +551,7 @@ class SOSMProblem:
         def l2(a, b):
             return sqrt(assemble(inner(a - b, a - b) * self.dx))
 
-        return {
+        out = {
             "mu_1": l2(self.mu_1_ms, mu_1 + l_1),
             "mu_2": l2(self.mu_2_ms, mu_2 + l_2),
             "grad_mu_1": l2(grad(self.mu_1_ms), grad(mu_1)),
@@ -567,6 +567,21 @@ class SOSMProblem:
             "x_1": l2(self.x_1_ms, x_1),
             "x_2": l2(self.x_2_ms, x_2),
         }
+
+        # Combined per-species norms, as Table 2 of the paper defines them:
+        #   E_J   = sqrt(sum_i ||J_i - J_h,i||^2)
+        #   E_mu  = sqrt(sum_i ||mu_i - mu_h,i||^2)
+        #   E_x   = sqrt(sum_i ||x_i - x_h,i||^2)
+        # and the mass-average constraint error
+        #   E_MA  = ||v_h - Psi_h sum_i J_h,i||
+        out["E_J"] = (float(out["mm_1"]) ** 2 + float(out["mm_2"]) ** 2) ** 0.5
+        out["E_mu"] = (float(out["mu_1"]) ** 2 + float(out["mu_2"]) ** 2) ** 0.5
+        out["E_x"] = (float(out["x_1"]) ** 2 + float(out["x_2"]) ** 2) ** 0.5
+
+        ma = v - (rho_inv * (mm_1 + mm_2))
+        out["E_MA"] = sqrt(assemble(inner(ma, ma) * self.dx))
+
+        return out
 
 
 # ---------------------------------------------------------------------------

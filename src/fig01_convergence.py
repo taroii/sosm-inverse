@@ -53,8 +53,10 @@ from sosm import SOSMProblem, solve_forward
 from runlog import Run
 
 # Fields to report rates for. Every field is recorded in metrics.csv regardless.
-RATE_FIELDS = ["mm_1", "mm_2", "mu_1", "mu_2", "p", "grad_v", "v", "x_1", "x_2"]
-PLOT_FIELDS = ["mm_1", "mu_1", "p", "grad_v", "v", "x_1"]
+# Named to match Table 2 of the paper where the paper combines species.
+RATE_FIELDS = ["E_J", "E_mu", "E_x", "E_MA", "p", "grad_v", "v",
+               "mm_1", "mm_2", "mu_1", "mu_2", "x_1", "x_2"]
+PLOT_FIELDS = ["E_J", "E_mu", "E_x", "E_MA", "p", "grad_v", "v"]
 
 
 def main():
