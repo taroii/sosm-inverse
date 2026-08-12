@@ -14,6 +14,10 @@ __pycache__/
 *.py[cod]
 .ipynb_checkpoints/
 
+# Captured stdout. These are outputs, not sources, and an untracked file in the
+# repo root trips runlog's dirty-tree guard.
+*.log
+
 # Firedrake / PETSc install, built inside the repo on the server.
 # Must be ignored: runlog.Run refuses to launch from a dirty tree, and an
 # untracked petsc/ or venv would block every run.
