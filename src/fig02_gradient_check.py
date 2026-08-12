@@ -62,11 +62,14 @@ def main():
                     help="D_12 used to generate the target field")
     ap.add_argument("--D-eval", type=float, default=1.4,
                     help="D_12 at which the gradient is checked")
+    ap.add_argument("--verbose", action="store_true",
+                    help="keep the per-iteration SNES and KSP monitors")
     ap.add_argument("--allow-dirty", action="store_true")
     args = ap.parse_args()
 
     config = vars(args).copy()
     config.pop("allow_dirty")
+    config.pop("verbose")
 
     with Run("gradient-check", config, allow_dirty=args.allow_dirty) as run:
 
@@ -83,7 +86,11 @@ def main():
         # mutate boundary data underneath a recorded solve.
         pause_annotation()
 
-        problem = SOSMProblem(d=args.d, k=args.k, N_mesh=args.N)
+        # quiet: this script does ~30 solves and their individual
+        # convergence histories are not what it measures. The one-line
+        # converged reason is kept, so a failed solve is still visible.
+        problem = SOSMProblem(d=args.d, k=args.k, N_mesh=args.N,
+                              quiet=not args.verbose)
 
         sln_true = solve_forward(problem, D_12=args.D_true)
         target = Function(problem.spaces["X_1"])

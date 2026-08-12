@@ -71,7 +71,7 @@ class SOSMProblem:
                  eta=1e-1, zeta=1e-1, gamma=1e1,
                  density_consistency=True, use_grad_rho_inv_exact=False,
                  newton_atol=1e-10, newton_max_it=10,
-                 ksp_atol=1e-13, ksp_rtol=1e-13):
+                 ksp_atol=1e-13, ksp_rtol=1e-13, quiet=False):
         assert d in (2, 3)
         assert mesh_type in ("tet", "hex")
 
@@ -86,6 +86,10 @@ class SOSMProblem:
         self.newton_max_it = newton_max_it
         self.ksp_atol = ksp_atol
         self.ksp_rtol = ksp_rtol
+        # quiet drops the per-iteration monitors but keeps the one-line
+        # converged reason, so a diverged solve is still visible. Worth setting
+        # for scripts that do many solves -- fig02 does about thirty.
+        self.quiet = quiet
 
         self._build_mesh()
 
@@ -472,6 +476,9 @@ class SOSMProblem:
         split_0 = ",".join(str(i) for i in range(n_pde))
         split_1 = ",".join(str(i) for i in range(n_pde, n_fields))
 
+        monitors = {} if self.quiet else {"snes_monitor": "",
+                                          "ksp_converged_reason": ""}
+
         return {"snes_type": "newtonls",
                 # "l2", not "basic". The electrolyte code chooses this with the
                 # comment "Prevent the fractions from becoming negative", and
@@ -481,8 +488,8 @@ class SOSMProblem:
                 # The original used "basic", but it also ran its own
                 # convergence test inside the Woodbury callback.
                 "snes_linesearch_type": "l2",
-                "snes_monitor": "",
                 "snes_converged_reason": "",
+                **monitors,
                 "snes_atol": self.newton_atol,
                 "snes_rtol": 0.0,
                 "snes_stol": 0.0,
@@ -493,7 +500,6 @@ class SOSMProblem:
                 "ksp_gmres_cgs_refinement_type": "refine_always",
                 "ksp_atol": self.ksp_atol,
                 "ksp_rtol": self.ksp_rtol,
-                "ksp_converged_reason": "",
 
                 "pc_type": "fieldsplit",
                 "pc_fieldsplit_type": "schur",
