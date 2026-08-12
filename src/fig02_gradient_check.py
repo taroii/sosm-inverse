@@ -71,26 +71,49 @@ def main():
     with Run("gradient-check", config, allow_dirty=args.allow_dirty) as run:
 
         # -- Everything that must NOT be taped. -----------------------------
-        # SOSMProblem.__init__ calls _fix_compatibility, which projects and then
-        # assigns to T_1/T_2. Those are Constants the flux Dirichlet BCs close
-        # over, so constructing the problem inside the annotated region would
-        # tape the projections and mutate boundary data underneath a recorded
-        # solve. Both problems are therefore built with annotation paused.
+        # ONE problem, used for both solves. Two SOSMProblem instances would
+        # build two separate UnitSquareMesh objects, and a form mixing a
+        # coefficient from one with an argument from the other raises
+        #     MismatchingDomainError: Argument or Coefficient domain not found
+        # even though the meshes are numerically identical.
+        #
+        # Annotation stays off here because SOSMProblem.__init__ calls
+        # _fix_compatibility, which projects and then assigns to T_1/T_2 --
+        # Constants that the flux Dirichlet BCs close over, so taping them would
+        # mutate boundary data underneath a recorded solve.
         pause_annotation()
 
-        p_true = SOSMProblem(d=args.d, k=args.k, N_mesh=args.N)
-        sln_true = solve_forward(p_true, D_12=args.D_true)
-        target = Function(p_true.spaces["X_1"])
+        problem = SOSMProblem(d=args.d, k=args.k, N_mesh=args.N)
+
+        sln_true = solve_forward(problem, D_12=args.D_true)
+        target = Function(problem.spaces["X_1"])
         target.assign(sln_true.subfunctions[6])
 
-        problem = SOSMProblem(d=args.d, k=args.k, N_mesh=args.N)
         problem.D_12.assign(args.D_eval)
+
+        # Build the initial guess ONCE, here, outside the tape. Left to
+        # solve_forward it would be rebuilt inside the annotated region, and
+        # initial_guess() performs nine L^2 projections, each an LU solve with
+        # MUMPS. Those would then be replayed on every functional evaluation --
+        # roughly 30 of them below -- for a result that never changes, since the
+        # guess depends only on the manufactured solution and not on D_12.
+        guess = problem.initial_guess()
 
         continue_annotation()
 
         # -- Taped from here: only the solve and the functional. ------------
+        # sln is reset from `guess` inside the tape, so every replay starts from
+        # the same state rather than warm-starting from the previous solve. The
+        # assign is annotated and cheap; the projections it replaces are not.
         control = Control(problem.D_12)
-        sln = solve_forward(problem)
+
+        sln = Function(problem.Z)
+        sln.assign(guess)
+
+        # check=False: check_constraints performs three assembles, and inside the
+        # annotated region those are taped and replayed too. The constraints are
+        # verified after the tape is closed instead.
+        sln = solve_forward(problem, sln=sln, check=False)
         J = misfit(problem, sln, target)
 
         # derivative() returns a Cofunction in the dual of the control space,
@@ -112,6 +135,13 @@ def main():
             return f
 
         pause_annotation()
+
+        # Constraint residuals and multipliers at the taped solution, now that
+        # annotation is off and these assembles will not be recorded.
+        for name, val in problem.check_constraints(sln).items():
+            PETSc.Sys.Print(f"  {name:>10s} = {val:+.6e}", flush=True)
+        PETSc.Sys.Print("", flush=True)
+
         steps = np.logspace(-1, -8, 15)
         rows = []
         for eps in steps:

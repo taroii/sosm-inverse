@@ -98,6 +98,16 @@ def provenance(extra=None):
     return info
 
 
+def _comm_rank():
+    """(comm, rank), or (None, 0) when mpi4py is unavailable or serial."""
+    try:
+        from mpi4py import MPI
+        comm = MPI.COMM_WORLD
+        return (comm, comm.rank) if comm.size > 1 else (None, 0)
+    except Exception:
+        return (None, 0)
+
+
 def _config_hash(config):
     blob = json.dumps(config, sort_keys=True, default=str).encode()
     return hashlib.sha256(blob).hexdigest()[:6]
@@ -121,15 +131,31 @@ class Run:
                 "allow_dirty=True for a scratch run."
             )
 
-        stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%S")
-        name = f"{stamp}_{slug}_{_config_hash(self.config)}"
+        # Under MPI every rank runs this. Each would stamp its own timestamp,
+        # giving several run directories for one run, and every rank would write
+        # the same files and append its own row to index.csv. Rank 0 decides the
+        # name and broadcasts it; only rank 0 writes.
+        self._comm, self._rank = _comm_rank()
+
+        if self._rank == 0:
+            stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%S")
+            name = f"{stamp}_{slug}_{_config_hash(self.config)}"
+        else:
+            name = None
+        if self._comm is not None:
+            name = self._comm.bcast(name, root=0)
 
         base = Path(root) if root else repo_root() / "runs"
         self.dir = base / name
-        (self.dir / "output").mkdir(parents=True, exist_ok=True)
 
-        (self.dir / "config.json").write_text(json.dumps(self.config, indent=2, default=str))
-        (self.dir / "env.json").write_text(json.dumps(prov, indent=2, default=str))
+        if self._rank == 0:
+            (self.dir / "output").mkdir(parents=True, exist_ok=True)
+            (self.dir / "config.json").write_text(
+                json.dumps(self.config, indent=2, default=str))
+            (self.dir / "env.json").write_text(
+                json.dumps(prov, indent=2, default=str))
+        if self._comm is not None:
+            self._comm.Barrier()
 
         self.provenance = prov
         self.rows = []
@@ -147,7 +173,7 @@ class Run:
         self._flush()
 
     def _flush(self):
-        if not self.rows:
+        if not self.rows or self._rank != 0:
             return
         keys = list(dict.fromkeys(k for row in self.rows for k in row))
         with self._metrics_path.open("w", newline="") as fh:
@@ -156,24 +182,34 @@ class Run:
             writer.writerows(self.rows)
 
     def _peak_rss_gb(self):
+        """Peak RSS in GB. Under MPI this is the max over ranks, not rank 0's:
+        rank 0 is not necessarily the heaviest, and the ceiling is what the
+        benchmark is after."""
         try:
             import resource
             peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
             # Linux reports kB, macOS reports bytes.
             scale = 1024 ** 2 if sys.platform == "darwin" else 1024
-            return peak / scale / 1024
+            gb = peak / scale / 1024
         except Exception:
             return None
+        if self._comm is not None:
+            from mpi4py import MPI
+            gb = self._comm.allreduce(gb, op=MPI.MAX)
+        return gb
 
     def finish(self, status="ok"):
         self._flush()
+        peak = self._peak_rss_gb()      # collective; every rank must call it
+        if self._rank != 0:
+            return None
         summary = {
             "run": self.dir.name,
             "slug": self.slug,
             "seed": self.seed,
             "status": status,
             "wall_s": round(time.time() - self._t0, 2),
-            "peak_rss_gb": self._peak_rss_gb(),
+            "peak_rss_gb": peak,
             "git_sha": self.provenance["git_sha"],
             "rows": len(self.rows),
         }
