@@ -519,25 +519,34 @@ class SOSMProblem:
                 "pc_fieldsplit_1_fields": split_1,
 
                 # Split 0: the nine PDE fields. Assembled, then MUMPS.
+                #
+                # `preonly` here, i.e. an EXACT block solve, where the electrolyte
+                # code uses three GMRES iterations. An inexact block is a fine
+                # preconditioner for the forward operator, but pyadjoint solves
+                # the TRANSPOSED system with these same parameters, and the
+                # transpose is not preconditioned equally well -- the adjoint
+                # solve stalls and exits DIVERGED_MAX_IT while every forward
+                # solve converges in three or four Newton steps. An exact block
+                # costs one extra triangular solve and removes the asymmetry.
                 "fieldsplit_0": {
                     "ksp_type": "preonly",
                     "pc_type": "python",
                     "pc_python_type": "firedrake.AssembledPC",
                     "assembled": {
-                        "ksp_type": "gmres",
-                        "ksp_max_it": 3,
-                        "ksp_atol": self.ksp_atol,
-                        "ksp_rtol": self.ksp_rtol,
+                        "ksp_type": "preonly",
                         "pc_type": "lu",
                         "pc_factor_mat_solver_type": "mumps",
                         "mat_mumps_icntl_14": 120,
                     },
                 },
 
-                # Split 1: the three real-space constants. Tiny.
+                # Split 1: the three real-space constants. Tiny, but give it room
+                # rather than capping at the multiplier count -- the cap is not a
+                # convergence criterion and the transposed Schur complement need
+                # not converge in as few iterations as the forward one.
                 "fieldsplit_1": {
                     "ksp_type": "gmres",
-                    "ksp_max_it": self.num_lagrange_mults,
+                    "ksp_max_it": 100,
                     "ksp_atol": self.ksp_atol,
                     "ksp_rtol": self.ksp_rtol,
                 }}
