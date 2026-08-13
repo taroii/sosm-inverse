@@ -70,7 +70,7 @@ class SOSMProblem:
                  D_1=0.5, D_2=2.0, deg_max=15,
                  eta=1e-1, zeta=1e-1, gamma=1e1,
                  density_consistency=True, use_grad_rho_inv_exact=False,
-                 newton_atol=1e-10, newton_max_it=10,
+                 newton_atol=1e-10, newton_rtol=1e-10, newton_max_it=10,
                  ksp_atol=1e-13, ksp_rtol=1e-13, quiet=False):
         assert d in (2, 3)
         assert mesh_type in ("tet", "hex")
@@ -83,6 +83,17 @@ class SOSMProblem:
         self.density_consistency = density_consistency
         self.use_grad_rho_inv_exact = use_grad_rho_inv_exact
         self.newton_atol = newton_atol
+        # A RELATIVE tolerance as well as an absolute one. The original and the
+        # electrolyte code both use absolute alone, which is fine when residuals
+        # are O(1) -- as they are for every forward solve here.
+        #
+        # The adjoint solve is not. pyadjoint reuses these parameters for it, and
+        # its right-hand side is dJ/du, which carries the objective's 1/sigma^2
+        # factor: at sigma = 1e-3 that is 1e6, putting the adjoint residual near
+        # 1e3. Reaching an absolute 1e-10 from there needs thirteen digits and
+        # simply times out, which surfaces as DIVERGED_MAX_IT inside
+        # _adjoint_solve rather than anywhere in the forward model.
+        self.newton_rtol = newton_rtol
         self.newton_max_it = newton_max_it
         self.ksp_atol = ksp_atol
         self.ksp_rtol = ksp_rtol
@@ -491,7 +502,7 @@ class SOSMProblem:
                 "snes_converged_reason": "",
                 **monitors,
                 "snes_atol": self.newton_atol,
-                "snes_rtol": 0.0,
+                "snes_rtol": self.newton_rtol,
                 "snes_stol": 0.0,
                 "snes_max_it": self.newton_max_it,
 

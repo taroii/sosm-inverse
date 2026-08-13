@@ -40,6 +40,7 @@ import numpy as np
 
 from firedrake import *
 from firedrake.adjoint import *
+from firedrake.petsc import PETSc
 
 from sosm import SOSMProblem, solve_forward
 
@@ -178,6 +179,10 @@ class Inversion:
         self.problem = SOSMProblem(d=d, k=k, N_mesh=N, quiet=quiet,
                                    newton_max_it=newton_max_it)
 
+        # Record the continuation trace so a failed run says WHICH step failed
+        # rather than only that something did.
+        self.cont_trace = []
+
         # Control is kappa, with D_12 = exp(kappa). Overriding the attribute
         # with a UFL expression is deliberate: sosm.py only ever reads D_12
         # inside the Onsager block, so an expression works exactly as a Function
@@ -242,9 +247,14 @@ class Inversion:
         # function of the control, so the whole walk is on the tape.
         for j in range(1, self.n_cont + 1):
             frac = j / self.n_cont
+            kap_j = self.kappa_ref + frac * (float(self.kappa.dat.data_ro[0])
+                                             - self.kappa_ref)
             self.problem.D_12 = exp(self.kappa_ref
                                     + frac * (self.kappa - self.kappa_ref))
+            PETSc.Sys.Print(f"  continuation {j}/{self.n_cont}: "
+                            f"D = {np.exp(kap_j):.6f}", flush=True)
             sln = solve_forward(self.problem, sln=sln, check=False)
+            self.cont_trace.append(float(np.exp(kap_j)))
 
         obs = observe(sln, self.P0, self.field)
         misfit = 0.5 * inner(obs - self.data, obs - self.data) / self.sigma ** 2
