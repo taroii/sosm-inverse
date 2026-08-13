@@ -55,7 +55,12 @@ def main():
     ap.add_argument("--k", type=int, default=4)
     ap.add_argument("--N", type=int, default=None)
     ap.add_argument("--method", default="lbfgs", choices=("lbfgs",))
-    ap.add_argument("--max-iter", type=int, default=100)
+    ap.add_argument("--max-iter", type=int, default=100,
+                    help="optimizer iterations")
+    ap.add_argument("--newton-max-it", type=int, default=50,
+                    help="Newton iterations per forward solve")
+    ap.add_argument("--verbose", action="store_true",
+                    help="show the SNES residual history for each solve")
 
     ap.add_argument("--check-gradient", action="store_true",
                     help="verify the adjoint gradient instead of inverting")
@@ -80,6 +85,7 @@ def main():
 
     config = vars(args).copy()
     config.pop("allow_dirty")
+    config.pop("verbose")
     slug = "gradient-check" if args.check_gradient else f"invert-{args.method}"
 
     with Run(slug, config, seed=args.seed, allow_dirty=args.allow_dirty) as run:
@@ -95,7 +101,9 @@ def main():
 
         inv = Inversion(points, data, args.sigma, args.D_init,
                         D_prior=args.D_prior, alpha=args.alpha,
-                        d=args.d, k=args.k, N=args.N)
+                        d=args.d, k=args.k, N=args.N,
+                        newton_max_it=args.newton_max_it,
+                        quiet=not args.verbose)
 
         if args.check_gradient:
             _check_gradient(inv, run, args)

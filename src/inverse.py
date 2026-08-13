@@ -158,7 +158,7 @@ class Inversion:
     """
 
     def __init__(self, points, data, sigma, D_init, D_prior=None, alpha=1e-4,
-                 d=2, k=4, N=16, field=X1):
+                 d=2, k=4, N=16, field=X1, newton_max_it=50, quiet=True):
         self.points = points
         self.sigma = sigma
         self.field = field
@@ -168,7 +168,14 @@ class Inversion:
         self.history = []
 
         pause_annotation()
-        self.problem = SOSMProblem(d=d, k=k, N_mesh=N, quiet=True)
+        # newton_max_it is generous here, and deliberately larger than the
+        # forward model's default of 10. Every solve in E2-E8 started from the
+        # projected manufactured solution AT D_12 = 1.0, so Newton had almost
+        # nothing to do and converged in one to four iterations. An inversion
+        # evaluates the forward model far from the true parameter -- that is the
+        # entire point -- so it needs a real iteration budget.
+        self.problem = SOSMProblem(d=d, k=k, N_mesh=N, quiet=quiet,
+                                   newton_max_it=newton_max_it)
 
         # Control is kappa, with D_12 = exp(kappa). Overriding the attribute
         # with a UFL expression is deliberate: sosm.py only ever reads D_12
