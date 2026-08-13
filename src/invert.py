@@ -1,0 +1,149 @@
+"""
+Run ONE inversion and record it. Computes; does not plot.
+
+Every paper figure is a query against the table this builds, so the axes a
+figure needs must be flags here rather than separate scripts:
+
+    --sigma      noise level          -> noise scaling
+    --k --N      inversion mesh       -> mesh independence
+    --D-init     starting guess       -> basin of attraction
+    --seed       noise realisation    -> repeatability
+    --method     lbfgs (picard next)  -> cost comparison
+    --d          2 or 3               -> the three-dimensional demonstration
+
+One run per process, one row per run in `runs/index.csv`, full history in the
+run's `metrics.csv`.
+
+Usage:
+    python src/invert.py --check-gradient        # run this FIRST
+    python src/invert.py --sigma 1e-3 --seed 0
+    python src/invert.py --sigma 1e-2 --seed 3 --D-init 100.0
+"""
+
+import argparse
+
+import numpy as np
+
+from firedrake.petsc import PETSc
+
+from inverse import sensor_points, synthetic_data, Inversion
+from runlog import Run
+
+
+def main():
+    ap = argparse.ArgumentParser()
+
+    # Truth and data generation. The data mesh is deliberately finer and of
+    # higher degree than the inversion mesh; see inverse.synthetic_data.
+    ap.add_argument("--D-true", type=float, default=1.0)
+    ap.add_argument("--sigma", type=float, default=1e-3)
+    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--data-k", type=int, default=5)
+    ap.add_argument("--data-N", type=int, default=64)
+    ap.add_argument("--sensors", type=int, default=4,
+                    help="sensors per spatial direction")
+
+    # Inversion.
+    ap.add_argument("--D-init", type=float, default=0.3)
+    ap.add_argument("--D-prior", type=float, default=None)
+    ap.add_argument("--alpha", type=float, default=1e-4)
+    ap.add_argument("--d", type=int, default=2, choices=(2, 3))
+    ap.add_argument("--k", type=int, default=4)
+    ap.add_argument("--N", type=int, default=16)
+    ap.add_argument("--method", default="lbfgs", choices=("lbfgs",))
+    ap.add_argument("--max-iter", type=int, default=100)
+
+    ap.add_argument("--check-gradient", action="store_true",
+                    help="verify the adjoint gradient instead of inverting")
+    ap.add_argument("--allow-dirty", action="store_true")
+    args = ap.parse_args()
+
+    if args.data_k <= args.k or args.data_N <= args.N:
+        PETSc.Sys.Print(
+            f"NOTE: data mesh (k={args.data_k}, N={args.data_N}) is not finer "
+            f"than the inversion mesh (k={args.k}, N={args.N}); "
+            f"discretization errors will partly cancel.", flush=True)
+
+    config = vars(args).copy()
+    config.pop("allow_dirty")
+    slug = "gradient-check" if args.check_gradient else f"invert-{args.method}"
+
+    with Run(slug, config, seed=args.seed, allow_dirty=args.allow_dirty) as run:
+
+        points = sensor_points(args.d, args.sensors)
+        data, clean = synthetic_data(points, args.D_true, args.sigma, args.seed,
+                                     d=args.d, k=args.data_k, N=args.data_N)
+
+        PETSc.Sys.Print(f"\nsensors        = {len(points)}", flush=True)
+        PETSc.Sys.Print(f"data rms       = {np.sqrt(np.mean(clean**2)):.6e}",
+                        flush=True)
+        PETSc.Sys.Print(f"noise sigma    = {args.sigma:.6e}", flush=True)
+
+        inv = Inversion(points, data, args.sigma, args.D_init,
+                        D_prior=args.D_prior, alpha=args.alpha,
+                        d=args.d, k=args.k, N=args.N)
+
+        if args.check_gradient:
+            _check_gradient(inv, run, args)
+            return
+
+        J0 = inv.value()
+        g0 = inv.gradient()
+        PETSc.Sys.Print(f"J(D_init)      = {J0:.8e}", flush=True)
+        PETSc.Sys.Print(f"dJ/dkappa      = {g0:.8e}\n", flush=True)
+
+        D_rec = inv.solve(max_iter=args.max_iter)
+        spectrum = inv.hessian_spectrum()
+
+        for row in inv.history:
+            run.record(**row)
+
+        rel_err = abs(D_rec - args.D_true) / args.D_true
+        PETSc.Sys.Print(f"\nD_true         = {args.D_true:.8e}", flush=True)
+        PETSc.Sys.Print(f"D_recovered    = {D_rec:.8e}", flush=True)
+        PETSc.Sys.Print(f"relative error = {rel_err:.6e}", flush=True)
+        PETSc.Sys.Print(f"forward solves = {inv.n_forward}", flush=True)
+        PETSc.Sys.Print(f"adjoint solves = {inv.n_adjoint}", flush=True)
+        PETSc.Sys.Print(f"hessian eigs   = "
+                        f"{', '.join(f'{e:.6e}' for e in spectrum)}", flush=True)
+
+        # One summary row, tagged so figures can separate it from the history.
+        run.record(summary=1, D_true=args.D_true, D_recovered=D_rec,
+                   rel_err=rel_err, sigma=args.sigma, seed=args.seed,
+                   D_init=args.D_init, alpha=args.alpha, k=args.k, N=args.N,
+                   d=args.d, method=args.method,
+                   n_forward=inv.n_forward, n_adjoint=inv.n_adjoint,
+                   hess_min=float(spectrum.min()),
+                   hess_max=float(spectrum.max()))
+
+
+def _check_gradient(inv, run, args):
+    """Centered differences against the adjoint, on THIS objective.
+
+    Required by README.md section IV at every new configuration. E7 verified the
+    gradient of a full-field misfit with respect to D_12; this objective is a
+    different functional of a different variable, so it needs its own check.
+    """
+    from firedrake.adjoint import taylor_test, pause_annotation, continue_annotation
+
+    g_adj = inv.gradient()
+    kappa0 = float(np.log(args.D_init))
+    PETSc.Sys.Print(f"\nadjoint dJ/dkappa = {g_adj:.8e}\n", flush=True)
+
+    pause_annotation()
+    for eps in np.logspace(-1, -8, 15):
+        jp = float(inv.Jhat(inv.at(np.exp(kappa0 + eps))))
+        jm = float(inv.Jhat(inv.at(np.exp(kappa0 - eps))))
+        g_fd = (jp - jm) / (2.0 * eps)
+        rel = abs(g_fd - g_adj) / max(abs(g_adj), 1e-300)
+        run.record(eps=eps, g_fd=g_fd, g_adj=g_adj, rel_err=rel)
+        PETSc.Sys.Print(f"  eps={eps:.2e}  fd={g_fd:.8e}  rel_err={rel:.3e}",
+                        flush=True)
+
+    rate = taylor_test(inv.Jhat, inv.at(args.D_init), inv.at(np.e))
+    continue_annotation()
+    PETSc.Sys.Print(f"\ntaylor_test convergence rate: {rate:.3f}", flush=True)
+
+
+if __name__ == "__main__":
+    main()

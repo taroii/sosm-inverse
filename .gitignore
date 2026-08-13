@@ -18,6 +18,7 @@ __pycache__/
 # repo root trips runlog's dirty-tree guard.
 *.log
 bench.csv
+sweep-*.log
 
 # Firedrake / PETSc install, built inside the repo on the server.
 # Must be ignored: runlog.Run refuses to launch from a dirty tree, and an
@@ -32,3 +33,6 @@ firedrake-configure
 *.vtu
 *.pvtu
 *.h5
+
+# vscode settings
+.vscode/
