@@ -38,8 +38,12 @@ def main():
     ap.add_argument("--D-true", type=float, default=1.0)
     ap.add_argument("--sigma", type=float, default=1e-3)
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--data-k", type=int, default=5)
-    ap.add_argument("--data-N", type=int, default=64)
+    # Defaults resolved per dimension after parsing: k=5, N=64 is an 11 GB
+    # solve in 2-D (E9) but astronomically larger in 3-D, where E8 shows k=4,
+    # N=8 is already 472888 dofs. Passing 2-D defaults to a 3-D run would OOM
+    # before the inversion started.
+    ap.add_argument("--data-k", type=int, default=None)
+    ap.add_argument("--data-N", type=int, default=None)
     ap.add_argument("--sensors", type=int, default=4,
                     help="sensors per spatial direction")
 
@@ -49,7 +53,7 @@ def main():
     ap.add_argument("--alpha", type=float, default=1e-4)
     ap.add_argument("--d", type=int, default=2, choices=(2, 3))
     ap.add_argument("--k", type=int, default=4)
-    ap.add_argument("--N", type=int, default=16)
+    ap.add_argument("--N", type=int, default=None)
     ap.add_argument("--method", default="lbfgs", choices=("lbfgs",))
     ap.add_argument("--max-iter", type=int, default=100)
 
@@ -57,6 +61,16 @@ def main():
                     help="verify the adjoint gradient instead of inverting")
     ap.add_argument("--allow-dirty", action="store_true")
     args = ap.parse_args()
+
+    # (inversion N, data k, data N) per dimension. The data mesh must be finer
+    # AND higher degree than the inversion mesh; that separation is the
+    # inverse-crime avoidance.
+    if args.N is None:
+        args.N = 16 if args.d == 2 else 4
+    if args.data_k is None:
+        args.data_k = 5 if args.d == 2 else 4
+    if args.data_N is None:
+        args.data_N = 64 if args.d == 2 else 8
 
     if args.data_k <= args.k or args.data_N <= args.N:
         PETSc.Sys.Print(
@@ -132,15 +146,15 @@ def _check_gradient(inv, run, args):
 
     pause_annotation()
     for eps in np.logspace(-1, -8, 15):
-        jp = float(inv.Jhat(inv.at(np.exp(kappa0 + eps))))
-        jm = float(inv.Jhat(inv.at(np.exp(kappa0 - eps))))
+        jp = float(inv.Jhat(inv.at_kappa(kappa0 + eps)))
+        jm = float(inv.Jhat(inv.at_kappa(kappa0 - eps)))
         g_fd = (jp - jm) / (2.0 * eps)
         rel = abs(g_fd - g_adj) / max(abs(g_adj), 1e-300)
         run.record(eps=eps, g_fd=g_fd, g_adj=g_adj, rel_err=rel)
         PETSc.Sys.Print(f"  eps={eps:.2e}  fd={g_fd:.8e}  rel_err={rel:.3e}",
                         flush=True)
 
-    rate = taylor_test(inv.Jhat, inv.at(args.D_init), inv.at(np.e))
+    rate = taylor_test(inv.Jhat, inv.at(args.D_init), inv.direction(1.0))
     continue_annotation()
     PETSc.Sys.Print(f"\ntaylor_test convergence rate: {rate:.3f}", flush=True)
 

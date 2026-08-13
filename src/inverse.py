@@ -33,6 +33,9 @@ magnitude.
 >>> here is a new configuration. E7 does not carry over.
 """
 
+import hashlib
+import json
+
 import numpy as np
 
 from firedrake import *
@@ -40,7 +43,8 @@ from firedrake.adjoint import *
 
 from sosm import SOSMProblem, solve_forward
 
-__all__ = ["sensor_points", "observe", "synthetic_data", "Inversion"]
+__all__ = ["sensor_points", "observer", "observe", "synthetic_data",
+           "Inversion"]
 
 # Index of x_1 in the mixed space, i.e. the field we observe.
 X1 = 6
@@ -62,20 +66,47 @@ def sensor_points(d, n_per_dim, margin=0.15):
     return np.column_stack([g.ravel() for g in grids])
 
 
-def observe(sln, points, field=X1):
-    """Differentiable point evaluation of one field at `points`.
+def observer(mesh, points):
+    """The P0 space on a VertexOnlyMesh at `points`.
+
+    Created ONCE per mesh and reused. Two VertexOnlyMesh objects over the same
+    points are still two distinct domains, so a form comparing an observation
+    built on one against data held on the other raises MismatchingDomainError.
+    Everything that must appear in the same form has to share this space.
+
+    Note `mesh` is passed explicitly rather than taken from a solution: for a
+    mixed function space `.mesh()` returns a MeshSequenceGeometry, which
+    VertexOnlyMesh does not accept.
+    """
+    return FunctionSpace(VertexOnlyMesh(mesh, points), "DG", 0)
+
+
+def observe(sln, P0, field=X1):
+    """Differentiable point evaluation of one field onto `P0`.
 
     `Function.at()` is NOT tapeable and must never appear in an objective.
     Interpolation onto a VertexOnlyMesh is the supported route, and it is what
     firedrake.adjoint records.
 
-    Returns a Function on the vertex-only mesh; its `dx` measure sums over the
-    points, so a misfit is `assemble(... * dx)` as usual.
+    The returned Function lives on the vertex-only mesh, whose `dx` measure sums
+    over the points, so a misfit is `assemble(... * dx)` as usual.
     """
-    mesh = sln.function_space().mesh()
-    vom = VertexOnlyMesh(mesh, points)
-    P0 = FunctionSpace(vom, "DG", 0)
     return assemble(interpolate(split(sln)[field], P0))
+
+
+def _cache_path(d, k, N, D_true, points):
+    """Cache key for the clean observations, including the code version.
+
+    The git SHA is in the key deliberately: any change to the forward model
+    invalidates the cache automatically, which is what stops a stale fine-mesh
+    solve from silently contaminating every later run.
+    """
+    from runlog import provenance, repo_root
+    blob = json.dumps({"d": d, "k": k, "N": N, "D": D_true,
+                       "pts": np.asarray(points).round(12).tolist(),
+                       "sha": provenance()["git_sha"]}, sort_keys=True).encode()
+    cache = repo_root() / "runs" / ".data_cache"
+    return cache / (hashlib.sha256(blob).hexdigest()[:16] + ".npy")
 
 
 def synthetic_data(points, D_true, sigma, seed, d=2, k=5, N=64, field=X1):
@@ -83,16 +114,28 @@ def synthetic_data(points, D_true, sigma, seed, d=2, k=5, N=64, field=X1):
 
     Defaults are higher degree and finer mesh than any inversion should use --
     that separation IS the inverse-crime avoidance, so do not quietly match them
-    to the inversion configuration.
+    to the inversion configuration. They are also 2-D defaults; see invert.py,
+    which resolves them per dimension.
+
+    The clean solve is CACHED, because it does not depend on the seed. Without
+    that, a ten-seed sweep repeats an identical fine-mesh solve ten times -- at
+    k=5, N=64 in 2-D that is 11 GB and 65 s each (E9), so six concurrent jobs
+    would exceed the machine's 48 GB before any inversion started.
 
     Returns (values, clean_values) as numpy arrays: noisy and noise-free. The
     second is only for reporting the achievable floor, never for fitting.
     """
-    pause_annotation()
-    problem = SOSMProblem(d=d, k=k, N_mesh=N, quiet=True)
-    sln = solve_forward(problem, D_12=D_true, check=False)
-    clean = observe(sln, points, field).dat.data_ro.copy()
-    continue_annotation()
+    path = _cache_path(d, k, N, D_true, points)
+    if path.exists():
+        clean = np.load(path)
+    else:
+        pause_annotation()
+        problem = SOSMProblem(d=d, k=k, N_mesh=N, quiet=True)
+        sln = solve_forward(problem, D_12=D_true, check=False)
+        clean = observe(sln, observer(problem.mesh, points), field).dat.data_ro.copy()
+        continue_annotation()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        np.save(path, clean)
 
     rng = np.random.default_rng(seed)
     noisy = clean + rng.normal(0.0, sigma, size=clean.shape)
@@ -137,23 +180,27 @@ class Inversion:
         self.problem.D_12 = exp(self.kappa)
 
         self.kappa_prior = Function(self.problem.R0)
-        self.kappa_prior.assign(float(np.log(D_prior if D_prior else D_init)))
+        self.kappa_prior.assign(float(np.log(D_prior if D_prior is not None else D_init)))
 
         # Built once, outside the tape: nine LU projections that depend only on
         # the manufactured solution, and would otherwise replay on every
         # objective evaluation.
         self.guess = self.problem.initial_guess()
 
-        # Data as a Function on this problem's OWN vertex-only mesh. The values
-        # came from a different (finer) mesh but arrived as plain numbers, so
-        # there is no cross-mesh coupling here.
-        vom = VertexOnlyMesh(self.problem.mesh, points)
-        self.P0 = FunctionSpace(vom, "DG", 0)
+        # ONE observation space, shared by the data and by the taped
+        # observation in _build. The values arrived from the finer data mesh as
+        # plain numbers, so there is no cross-mesh coupling -- but the data and
+        # the observation must live on the SAME vertex-only mesh.
+        self.P0 = observer(self.problem.mesh, points)
         self.data = Function(self.P0)
         self.data.dat.data[:] = data
         continue_annotation()
 
         self.Jhat = self._build()
+        # _build performs one forward solve to lay the tape, and that solve does
+        # not pass through eval_cb_post. Counting it matters: the cost
+        # comparison in README.md section IV is measured in forward solves.
+        self.n_forward = 1
 
     # -- Tape ---------------------------------------------------------------
 
@@ -164,7 +211,7 @@ class Inversion:
         sln.assign(self.guess)
         sln = solve_forward(self.problem, sln=sln, check=False)
 
-        obs = observe(sln, self.points, self.field)
+        obs = observe(sln, self.P0, self.field)
         misfit = 0.5 * inner(obs - self.data, obs - self.data) / self.sigma ** 2
 
         dkappa = self.kappa - self.kappa_prior
@@ -188,11 +235,19 @@ class Inversion:
 
     # -- Interface ----------------------------------------------------------
 
-    def at(self, D):
-        """An R-space Function holding log(D), the shape the control expects."""
+    def at_kappa(self, kappa):
+        """An R-space Function holding kappa, the shape the control expects."""
         f = Function(self.problem.R0)
-        f.assign(float(np.log(D)))
+        f.assign(float(kappa))
         return f
+
+    def at(self, D):
+        """Same, given D rather than kappa = log D."""
+        return self.at_kappa(np.log(D))
+
+    def direction(self, value=1.0):
+        """A perturbation direction in kappa, for taylor_test."""
+        return self.at_kappa(value)
 
     def value(self, D=None):
         return float(self.Jhat(self.at(D))) if D else float(self.Jhat.functional)
@@ -201,10 +256,17 @@ class Inversion:
         return float(self.Jhat.derivative().dat.data_ro[0])
 
     def solve(self, tol=1e-8, max_iter=100):
-        """Minimize. Returns the recovered D_12."""
+        """Minimize. Returns the recovered D_12.
+
+        The control is re-evaluated at the optimum before returning, so anything
+        computed afterwards -- the Hessian spectrum in particular -- is taken
+        there rather than wherever the last line-search trial happened to land.
+        """
         opt = minimize(self.Jhat, method="L-BFGS-B",
                        options={"gtol": tol, "maxiter": max_iter})
-        return float(np.exp(opt.dat.data_ro[0]))
+        kappa_opt = float(opt.dat.data_ro[0])
+        self.Jhat(self.at_kappa(kappa_opt))
+        return float(np.exp(kappa_opt))
 
     def hessian_spectrum(self):
         """Eigenvalues of the Hessian in kappa, one Hessian action per column.

@@ -32,8 +32,20 @@ run_one() {
     python src/invert.py "$@" >>"$LOG" 2>&1 \
         && echo "ok   $*" || echo "FAIL $*"
 }
+
+# Warm the clean-data cache serially before fanning out. The fine-mesh solve is
+# identical across seeds, but if N jobs start together they all miss the cache
+# and each builds an 11 GB solve at once. One cheap serial run first, then the
+# rest hit the cache and hold only their own inversion.
+warm_cache() {
+    echo "warming data cache (one fine-mesh solve)..."
+    python src/invert.py "$@" --check-gradient >>"$LOG" 2>&1 \
+        && echo "cache warm" || echo "WARN: cache warm failed, see $LOG"
+}
 export -f run_one
 export LOG
+
+warm_cache --k "$K" --N "$N" --d "$D" --sigma 1e-3 --seed 0
 
 case "$AXIS" in
     noise)
