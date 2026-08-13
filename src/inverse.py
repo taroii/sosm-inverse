@@ -51,6 +51,20 @@ __all__ = ["sensor_points", "observer", "observe", "synthetic_data",
 X1 = 6
 
 
+def _scalar(control):
+    """Read the scalar out of whatever pyadjoint hands a callback.
+
+    ReducedFunctional calls `self.controls.delist(values)`, which returns a bare
+    Function when there is a single control and a list when there are several.
+    Indexing the bare Function hits UFL's operator and raises IndexError, so
+    normalise here rather than at each call site -- this becomes a list again
+    the moment n > 2 introduces several diffusivities.
+    """
+    if isinstance(control, (list, tuple)):
+        control = control[0]
+    return float(control.dat.data_ro[0])
+
+
 # ---------------------------------------------------------------------------
 # Observation operator
 # ---------------------------------------------------------------------------
@@ -270,10 +284,11 @@ class Inversion:
 
     def _on_eval(self, value, controls):
         self.n_forward += self.n_cont
+        kappa = _scalar(controls)
         self.history.append({"eval": self.n_forward,
                              "J": float(value),
-                             "kappa": float(controls[0].dat.data_ro[0]),
-                             "D_12": float(np.exp(controls[0].dat.data_ro[0]))})
+                             "kappa": kappa,
+                             "D_12": float(np.exp(kappa))})
 
     def _on_derivative(self, value, derivative, controls):
         # Must RETURN the derivatives: pyadjoint uses this callback's return
