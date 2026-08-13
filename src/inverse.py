@@ -276,7 +276,10 @@ class Inversion:
                              "D_12": float(np.exp(controls[0].dat.data_ro[0]))})
 
     def _on_derivative(self, value, derivative, controls):
+        # Must RETURN the derivatives: pyadjoint uses this callback's return
+        # value, not just its side effect, and raises if it gets None.
         self.n_adjoint += 1
+        return derivative
 
     # -- Interface ----------------------------------------------------------
 
