@@ -59,6 +59,8 @@ def main():
                     help="optimizer iterations")
     ap.add_argument("--newton-max-it", type=int, default=50,
                     help="Newton iterations per forward solve")
+    ap.add_argument("--cont-max-step", type=float, default=0.35,
+                    help="largest continuation step in kappa (0.35 ~ 1.4x in D)")
     ap.add_argument("--verbose", action="store_true",
                     help="show the SNES residual history for each solve")
 
@@ -103,7 +105,11 @@ def main():
                         D_prior=args.D_prior, alpha=args.alpha,
                         d=args.d, k=args.k, N=args.N,
                         newton_max_it=args.newton_max_it,
+                        cont_max_step=args.cont_max_step,
                         quiet=not args.verbose)
+
+        PETSc.Sys.Print(f"continuation   = {inv.n_cont} steps "
+                        f"from D=1 to D={args.D_init}", flush=True)
 
         if args.check_gradient:
             _check_gradient(inv, run, args)

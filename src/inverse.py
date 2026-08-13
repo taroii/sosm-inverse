@@ -158,7 +158,8 @@ class Inversion:
     """
 
     def __init__(self, points, data, sigma, D_init, D_prior=None, alpha=1e-4,
-                 d=2, k=4, N=16, field=X1, newton_max_it=50, quiet=True):
+                 d=2, k=4, N=16, field=X1, newton_max_it=50, quiet=True,
+                 cont_max_step=0.35):
         self.points = points
         self.sigma = sigma
         self.field = field
@@ -203,11 +204,28 @@ class Inversion:
         self.data.dat.data[:] = data
         continue_annotation()
 
+        # Continuation step count, fixed once here and never varied afterwards.
+        #
+        # `initial_guess` is the projected manufactured solution, which solves
+        # the problem exactly at D_12 = D_1 * D_2 = 1, i.e. kappa = 0. Starting
+        # Newton there and jumping straight to kappa = log(0.3) stalls: the
+        # residual falls from 12.7 to 9.9 and then sits at 10.4 while the line
+        # search cuts the step to nothing. So we walk there instead, in steps
+        # small enough that each one is the size of jump Newton handles easily
+        # (a factor of about 1.4 in D, which converged in four iterations in E7).
+        #
+        # The count depends on D_init only, so the tape has a FIXED number of
+        # solves -- which it must, since ReducedFunctional replays the recorded
+        # tape rather than re-running this function.
+        self.kappa_ref = 0.0
+        span = abs(float(np.log(D_init)) - self.kappa_ref)
+        self.n_cont = max(1, int(np.ceil(span / cont_max_step)))
+
         self.Jhat = self._build()
-        # _build performs one forward solve to lay the tape, and that solve does
-        # not pass through eval_cb_post. Counting it matters: the cost
+        # _build performs n_cont forward solves to lay the tape, and those do
+        # not pass through eval_cb_post. Counting them matters: the cost
         # comparison in README.md section IV is measured in forward solves.
-        self.n_forward = 1
+        self.n_forward = self.n_cont
 
     # -- Tape ---------------------------------------------------------------
 
@@ -216,7 +234,17 @@ class Inversion:
 
         sln = Function(self.problem.Z)
         sln.assign(self.guess)
-        sln = solve_forward(self.problem, sln=sln, check=False)
+
+        # Walk from kappa_ref to kappa in n_cont equal steps, warm-starting each
+        # solve from the previous. Interpolating in kappa (not D) makes the
+        # steps geometric in D, which is the right spacing for a quantity
+        # spanning orders of magnitude. Every intermediate is a differentiable
+        # function of the control, so the whole walk is on the tape.
+        for j in range(1, self.n_cont + 1):
+            frac = j / self.n_cont
+            self.problem.D_12 = exp(self.kappa_ref
+                                    + frac * (self.kappa - self.kappa_ref))
+            sln = solve_forward(self.problem, sln=sln, check=False)
 
         obs = observe(sln, self.P0, self.field)
         misfit = 0.5 * inner(obs - self.data, obs - self.data) / self.sigma ** 2
@@ -231,7 +259,7 @@ class Inversion:
                                  derivative_cb_post=self._on_derivative)
 
     def _on_eval(self, value, controls):
-        self.n_forward += 1
+        self.n_forward += self.n_cont
         self.history.append({"eval": self.n_forward,
                              "J": float(value),
                              "kappa": float(controls[0].dat.data_ro[0]),
