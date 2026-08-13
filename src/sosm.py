@@ -70,7 +70,7 @@ class SOSMProblem:
                  D_1=0.5, D_2=2.0, deg_max=15,
                  eta=1e-1, zeta=1e-1, gamma=1e1,
                  density_consistency=True, use_grad_rho_inv_exact=False,
-                 newton_atol=1e-10, newton_rtol=1e-10, newton_max_it=10,
+                 newton_atol=1e-8, newton_rtol=1e-10, newton_max_it=10,
                  ksp_atol=1e-13, ksp_rtol=1e-13, quiet=False):
         assert d in (2, 3)
         assert mesh_type in ("tet", "hex")
@@ -82,6 +82,16 @@ class SOSMProblem:
         self.deg_max = deg_max
         self.density_consistency = density_consistency
         self.use_grad_rho_inv_exact = use_grad_rho_inv_exact
+        # 1e-8, not 1e-10. pyadjoint reuses these parameters for the TRANSPOSED
+        # solve, and the adjoint residual stagnates around 7e-10 -- flat, with
+        # jitter only in the last digits, i.e. round-off limited rather than
+        # badly preconditioned. Demanding 1e-10 makes it grind to snes_max_it and
+        # exit DIVERGED_MAX_IT for a solve that has in fact converged.
+        #
+        # The forward solves are unaffected. Newton is quadratic here, so its
+        # final step overshoots any tolerance in this range: E5 at k=4, N=8 went
+        # 1.68e-2 -> 4.73e-7 -> 3.72e-14, which stops at the same iteration under
+        # 1e-8 as under 1e-10. Re-run fig01 to confirm Table 2 still reproduces.
         self.newton_atol = newton_atol
         # A RELATIVE tolerance as well as an absolute one. The original and the
         # electrolyte code both use absolute alone, which is fine when residuals
@@ -519,34 +529,25 @@ class SOSMProblem:
                 "pc_fieldsplit_1_fields": split_1,
 
                 # Split 0: the nine PDE fields. Assembled, then MUMPS.
-                #
-                # `preonly` here, i.e. an EXACT block solve, where the electrolyte
-                # code uses three GMRES iterations. An inexact block is a fine
-                # preconditioner for the forward operator, but pyadjoint solves
-                # the TRANSPOSED system with these same parameters, and the
-                # transpose is not preconditioned equally well -- the adjoint
-                # solve stalls and exits DIVERGED_MAX_IT while every forward
-                # solve converges in three or four Newton steps. An exact block
-                # costs one extra triangular solve and removes the asymmetry.
                 "fieldsplit_0": {
                     "ksp_type": "preonly",
                     "pc_type": "python",
                     "pc_python_type": "firedrake.AssembledPC",
                     "assembled": {
-                        "ksp_type": "preonly",
+                        "ksp_type": "gmres",
+                        "ksp_max_it": 3,
+                        "ksp_atol": self.ksp_atol,
+                        "ksp_rtol": self.ksp_rtol,
                         "pc_type": "lu",
                         "pc_factor_mat_solver_type": "mumps",
                         "mat_mumps_icntl_14": 120,
                     },
                 },
 
-                # Split 1: the three real-space constants. Tiny, but give it room
-                # rather than capping at the multiplier count -- the cap is not a
-                # convergence criterion and the transposed Schur complement need
-                # not converge in as few iterations as the forward one.
+                # Split 1: the three real-space constants. Tiny.
                 "fieldsplit_1": {
                     "ksp_type": "gmres",
-                    "ksp_max_it": 100,
+                    "ksp_max_it": self.num_lagrange_mults,
                     "ksp_atol": self.ksp_atol,
                     "ksp_rtol": self.ksp_rtol,
                 }}
