@@ -82,31 +82,48 @@ def sensor_points(d, n_per_dim, margin=0.15):
 
 
 def observer(mesh, points):
-    """The P0 space on a VertexOnlyMesh at `points`.
+    """(P0, P0_input) on a VertexOnlyMesh at `points`.
 
-    Created ONCE per mesh and reused. Two VertexOnlyMesh objects over the same
-    points are still two distinct domains, so a form comparing an observation
-    built on one against data held on the other raises MismatchingDomainError.
-    Everything that must appear in the same form has to share this space.
+    Returns TWO spaces, and the second is the one that matters for correctness.
 
-    Note `mesh` is passed explicitly rather than taken from a solution: for a
+    A VertexOnlyMesh does not keep the points in the order they were given: it
+    orders them by which cell owns them, so the ordering depends on the mesh.
+    Data generated on the fine mesh and compared against observations on the
+    coarse mesh are therefore permuted differently, and a misfit built from the
+    raw `.dat.data` of each compares sensor i against sensor j. It does not
+    error -- it silently minimizes the wrong quantity.
+
+    `vom.input_ordering` is a mesh whose ordering matches the input array, so
+    interpolating into its P0 space puts every mesh's values in the same,
+    canonical order. All comparisons happen there.
+
+    Created ONCE per mesh and reused: two VertexOnlyMesh objects over the same
+    points are still distinct domains, and a form mixing them raises
+    MismatchingDomainError.
+
+    `mesh` is passed explicitly rather than taken from a solution because for a
     mixed function space `.mesh()` returns a MeshSequenceGeometry, which
     VertexOnlyMesh does not accept.
     """
-    return FunctionSpace(VertexOnlyMesh(mesh, points), "DG", 0)
+    vom = VertexOnlyMesh(mesh, points)
+    return (FunctionSpace(vom, "DG", 0),
+            FunctionSpace(vom.input_ordering, "DG", 0))
 
 
-def observe(sln, P0, field=X1):
-    """Differentiable point evaluation of one field onto `P0`.
+def observe(sln, spaces, field=X1):
+    """Differentiable point evaluation of one field, in INPUT point order.
 
     `Function.at()` is NOT tapeable and must never appear in an objective.
     Interpolation onto a VertexOnlyMesh is the supported route, and it is what
-    firedrake.adjoint records.
+    firedrake.adjoint records; the second interpolation restores input ordering
+    and is equally tapeable.
 
-    The returned Function lives on the vertex-only mesh, whose `dx` measure sums
-    over the points, so a misfit is `assemble(... * dx)` as usual.
+    The returned Function lives on the input-ordering mesh, whose `dx` measure
+    sums over the points, so a misfit is `assemble(... * dx)` as usual.
     """
-    return assemble(interpolate(split(sln)[field], P0))
+    P0, P0_input = spaces
+    at_points = assemble(interpolate(split(sln)[field], P0))
+    return assemble(interpolate(at_points, P0_input))
 
 
 def _cache_path(d, k, N, D_true, points):
@@ -218,8 +235,8 @@ class Inversion:
         # observation in _build. The values arrived from the finer data mesh as
         # plain numbers, so there is no cross-mesh coupling -- but the data and
         # the observation must live on the SAME vertex-only mesh.
-        self.P0 = observer(self.problem.mesh, points)
-        self.data = Function(self.P0)
+        self.P0, self.P0_input = observer(self.problem.mesh, points)
+        self.data = Function(self.P0_input)
         self.data.dat.data[:] = data
         continue_annotation()
 
@@ -270,7 +287,7 @@ class Inversion:
             sln = solve_forward(self.problem, sln=sln, check=False)
             self.cont_trace.append(float(np.exp(kap_j)))
 
-        obs = observe(sln, self.P0, self.field)
+        obs = observe(sln, (self.P0, self.P0_input), self.field)
         misfit = 0.5 * inner(obs - self.data, obs - self.data) / self.sigma ** 2
 
         dkappa = self.kappa - self.kappa_prior
@@ -297,6 +314,26 @@ class Inversion:
         return derivative
 
     # -- Interface ----------------------------------------------------------
+
+    def data_check(self, D_true):
+        """Misfit RMS between this mesh's prediction at D_true and the data.
+
+        Should sit at the noise level. Anything larger means the model and the
+        data disagree for a reason other than noise -- a mismatched observation
+        operator, a stale cache, or points compared in different orders. The
+        last of those produced a misfit of 0.06 against a data RMS of 0.67 and a
+        recovered D that was 59 percent high, with no error raised anywhere.
+        """
+        pause_annotation()
+        saved, self.problem.D_12 = self.problem.D_12, Constant(float(D_true))
+        sln = Function(self.problem.Z)
+        sln.assign(self.guess)
+        sln = solve_forward(self.problem, sln=sln, check=False)
+        obs = observe(sln, (self.P0, self.P0_input), self.field)
+        diff = obs.dat.data_ro - self.data.dat.data_ro
+        self.problem.D_12 = saved
+        continue_annotation()
+        return float(np.sqrt(np.mean(diff ** 2)))
 
     def at_kappa(self, kappa):
         """An R-space Function holding kappa, the shape the control expects."""

@@ -111,6 +111,14 @@ def main():
         PETSc.Sys.Print(f"continuation   = {inv.n_cont} steps "
                         f"from D=1 to D={args.D_init}", flush=True)
 
+        # Standing check, one extra solve. The misfit between this mesh's own
+        # prediction at D_true and the data must sit at the noise level; if it
+        # does not, the objective is not minimized near the truth and every
+        # downstream number is meaningless. Cheap enough to run every time.
+        rms = inv.data_check(args.D_true)
+        PETSc.Sys.Print(f"data check     = {rms:.6e} rms at D_true "
+                        f"(sigma = {args.sigma:.1e})", flush=True)
+
         if args.check_gradient:
             _check_gradient(inv, run, args)
             return
