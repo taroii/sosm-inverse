@@ -355,14 +355,27 @@ class Inversion:
     def gradient(self):
         return float(self.Jhat.derivative().dat.data_ro[0])
 
-    def solve(self, tol=1e-8, max_iter=100):
-        """Minimize. Returns the recovered D_12.
+    def solve(self, tol=1e-8, max_iter=100, D_min=0.5, D_max=10.0):
+        """Minimize over log D_12, bounded. Returns the recovered D_12.
 
-        The control is re-evaluated at the optimum before returning, so anything
-        computed afterwards -- the Hessian spectrum in particular -- is taken
-        there rather than wherever the last line-search trial happened to land.
+        The bounds are not a convenience -- they are what keeps the optimizer
+        inside the region where the forward problem has a solution at all.
+
+        Continuation experiments put the lower solvability limit near
+        D_12 = 0.45 for this configuration: Newton takes 3-4 iterations down to
+        D = 0.52, 8 at D = 0.477, and fails outright at D = 0.435, with
+        ten-times-finer steps moving that edge only from 0.55 to 0.48. Below it
+        the Onsager drag is strong enough that the prescribed boundary fluxes
+        demand chemical-potential gradients driving a mole fraction to zero,
+        where mu = RT ln(x p) is singular.
+
+        Unbounded, L-BFGS takes a first step from D = 1.2 large enough to cross
+        that edge, and the run dies inside a line-search trial. Bounding is the
+        honest fix: the search region is a measured property of the problem, not
+        a tuning parameter, and reporting it is part of the result.
         """
         opt = minimize(self.Jhat, method="L-BFGS-B",
+                       bounds=[float(np.log(D_min)), float(np.log(D_max))],
                        options={"gtol": tol, "maxiter": max_iter})
         kappa_opt = float(opt.dat.data_ro[0])
         self.Jhat(self.at_kappa(kappa_opt))

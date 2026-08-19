@@ -57,6 +57,11 @@ def main():
     ap.add_argument("--method", default="lbfgs", choices=("lbfgs",))
     ap.add_argument("--max-iter", type=int, default=100,
                     help="optimizer iterations")
+    # Search bounds. The lower one is a measured property: continuation fails
+    # below D ~ 0.45 for this configuration, so anything under that is not a
+    # worse guess, it is a guess with no forward solution. See Inversion.solve.
+    ap.add_argument("--D-min", type=float, default=0.5)
+    ap.add_argument("--D-max", type=float, default=10.0)
     ap.add_argument("--newton-max-it", type=int, default=50,
                     help="Newton iterations per forward solve")
     ap.add_argument("--cont-max-step", type=float, default=0.35,
@@ -128,7 +133,8 @@ def main():
         PETSc.Sys.Print(f"J(D_init)      = {J0:.8e}", flush=True)
         PETSc.Sys.Print(f"dJ/dkappa      = {g0:.8e}\n", flush=True)
 
-        D_rec = inv.solve(max_iter=args.max_iter)
+        D_rec = inv.solve(max_iter=args.max_iter,
+                          D_min=args.D_min, D_max=args.D_max)
 
         # Decoupled deliberately: an optional diagnostic must not destroy a
         # completed inversion. This is NOT a claim that the failure is
@@ -165,7 +171,8 @@ def main():
             run.record(**row)
 
         rel_err = abs(D_rec - args.D_true) / args.D_true
-        PETSc.Sys.Print(f"\nD_true         = {args.D_true:.8e}", flush=True)
+        PETSc.Sys.Print(f"\nsearch bounds  = [{args.D_min}, {args.D_max}]", flush=True)
+        PETSc.Sys.Print(f"D_true         = {args.D_true:.8e}", flush=True)
         PETSc.Sys.Print(f"D_recovered    = {D_rec:.8e}", flush=True)
         PETSc.Sys.Print(f"relative error = {rel_err:.6e}", flush=True)
         PETSc.Sys.Print(f"forward solves = {inv.n_forward}", flush=True)
@@ -178,6 +185,7 @@ def main():
         run.record(summary=1, D_true=args.D_true, D_recovered=D_rec,
                    rel_err=rel_err, sigma=args.sigma, seed=args.seed,
                    D_init=args.D_init, alpha=args.alpha, k=args.k, N=args.N,
+                   D_min=args.D_min, D_max=args.D_max,
                    d=args.d, method=args.method,
                    n_forward=inv.n_forward, n_adjoint=inv.n_adjoint,
                    hess_status=hess_status,
