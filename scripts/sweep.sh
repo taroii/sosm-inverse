@@ -65,8 +65,13 @@ case "$AXIS" in
         done
         ;;
     basin)
-        # Starting guesses over four orders of magnitude around D_true = 1.
-        for init in 0.01 0.1 0.3 3.0 10.0 100.0; do
+        # Starting guesses spanning the SOLVABLE range, not four orders of
+        # magnitude. Continuation fails below D ~ 0.45 for this configuration
+        # (E11, and the trace in E10b's neighbourhood), so 0.01 and 0.1 are not
+        # hard starting guesses -- they are guesses with no forward solution, and
+        # every such cell would have failed rather than reported a wide basin.
+        # The upper edge is not yet measured; 8.0 sits inside the default bound.
+        for init in 0.6 0.8 1.5 2.5 4.0 8.0; do
             for seed in $SEEDS; do
                 echo --D-init "$init" --seed "$seed" --k "$K" --N "$N" \
                      --sigma 1e-3 --d "$D"
