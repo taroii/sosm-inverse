@@ -121,7 +121,37 @@ def main():
         PETSc.Sys.Print(f"dJ/dkappa      = {g0:.8e}\n", flush=True)
 
         D_rec = inv.solve(max_iter=args.max_iter)
-        spectrum = inv.hessian_spectrum()
+
+        # Decoupled deliberately: an optional diagnostic must not destroy a
+        # completed inversion. This is NOT a claim that the failure is
+        # understood.
+        #
+        # What is known: pyadjoint reaches the Hessian through a tangent-linear
+        # pass whose solve goes via `_assembled_solve`, and it fails with
+        #     ConvergenceError: DIVERGED_LINEAR_SOLVE  (0 iterations)
+        # NOT with E0's
+        #     ValueError: Monolithic matrix assembly not supported ...
+        # so the operator assembled successfully and the KSP then failed
+        # immediately. Whatever this is, it is not E0.
+        #
+        # Untested hypothesis: `_assembled_solve` forwards our solver_parameters,
+        # which specify mat_type "matfree" and a fieldsplit tuned for the
+        # matfree operator, to a solve on an already-assembled matrix -- an
+        # inconsistent pairing. Testing that means giving the tangent-linear
+        # solve its own parameters, which is worth doing when the Hessian is
+        # needed and not before: it is a 1x1 matrix while n = 2, and only
+        # becomes the identifiability measurement once several diffusivities
+        # exist.
+        #
+        # The full message is printed and the status recorded, so this stays
+        # visible in the results table rather than only in scrollback.
+        spectrum, hess_status = None, "ok"
+        try:
+            spectrum = inv.hessian_spectrum()
+        except Exception as exc:
+            hess_status = f"{type(exc).__name__}: {exc}".replace("\n", " ")[:200]
+            PETSc.Sys.Print(f"hessian eigs   = UNAVAILABLE", flush=True)
+            PETSc.Sys.Print(f"  {hess_status}", flush=True)
 
         for row in inv.history:
             run.record(**row)
@@ -132,8 +162,9 @@ def main():
         PETSc.Sys.Print(f"relative error = {rel_err:.6e}", flush=True)
         PETSc.Sys.Print(f"forward solves = {inv.n_forward}", flush=True)
         PETSc.Sys.Print(f"adjoint solves = {inv.n_adjoint}", flush=True)
-        PETSc.Sys.Print(f"hessian eigs   = "
-                        f"{', '.join(f'{e:.6e}' for e in spectrum)}", flush=True)
+        if spectrum is not None:
+            PETSc.Sys.Print(f"hessian eigs   = "
+                            f"{', '.join(f'{e:.6e}' for e in spectrum)}", flush=True)
 
         # One summary row, tagged so figures can separate it from the history.
         run.record(summary=1, D_true=args.D_true, D_recovered=D_rec,
@@ -141,8 +172,9 @@ def main():
                    D_init=args.D_init, alpha=args.alpha, k=args.k, N=args.N,
                    d=args.d, method=args.method,
                    n_forward=inv.n_forward, n_adjoint=inv.n_adjoint,
-                   hess_min=float(spectrum.min()),
-                   hess_max=float(spectrum.max()))
+                   hess_status=hess_status,
+                   hess_min=float(spectrum.min()) if spectrum is not None else "",
+                   hess_max=float(spectrum.max()) if spectrum is not None else "")
 
 
 def _check_gradient(inv, run, args):
