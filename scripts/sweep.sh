@@ -26,6 +26,7 @@ SEEDS="${SEEDS:-0 1 2 3 4 5 6 7 8 9}"
 K="${K:-4}"
 N="${N:-16}"
 D="${D:-2}"
+D_INIT="${D_INIT:-1.2}"
 LOG=sweep-$AXIS.log
 
 run_one() {
@@ -45,14 +46,15 @@ warm_cache() {
 export -f run_one
 export LOG
 
-warm_cache --k "$K" --N "$N" --d "$D" --sigma 1e-3 --seed 0
+warm_cache --k "$K" --N "$N" --d "$D" --sigma 1e-3 --seed 0 --D-init "$D_INIT"
 
 case "$AXIS" in
     noise)
         # Recovery error against noise level. Includes the baseline cell.
         for s in 1e-4 3e-4 1e-3 3e-3 1e-2; do
             for seed in $SEEDS; do
-                echo --sigma "$s" --seed "$seed" --k "$K" --N "$N" --d "$D"
+                echo --sigma "$s" --seed "$seed" --k "$K" --N "$N" --d "$D" \
+                     --D-init "$D_INIT"
             done
         done
         ;;
@@ -60,7 +62,8 @@ case "$AXIS" in
         # Recovery error against inversion mesh, data mesh held fixed.
         for n in 8 16 32 64; do
             for seed in $SEEDS; do
-                echo --N "$n" --k "$K" --seed "$seed" --sigma 1e-3 --d "$D"
+                echo --N "$n" --k "$K" --seed "$seed" --sigma 1e-3 --d "$D" \
+                     --D-init "$D_INIT"
             done
         done
         ;;

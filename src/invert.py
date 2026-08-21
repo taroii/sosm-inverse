@@ -48,7 +48,11 @@ def main():
                     help="sensors per spatial direction")
 
     # Inversion.
-    ap.add_argument("--D-init", type=float, default=0.3)
+    # 1.2, not 0.3. The old default predates the solvability measurement and
+    # sits below the D ~ 0.45 limit, so every run using it died mid-continuation
+    # after a 50-iteration Newton failure. 20 percent off the truth is a
+    # reasonable starting guess and is comfortably inside the solvable range.
+    ap.add_argument("--D-init", type=float, default=1.2)
     ap.add_argument("--D-prior", type=float, default=None)
     ap.add_argument("--alpha", type=float, default=1e-4)
     ap.add_argument("--d", type=int, default=2, choices=(2, 3))
@@ -83,6 +87,17 @@ def main():
         args.data_k = 5 if args.d == 2 else 4
     if args.data_N is None:
         args.data_N = 64 if args.d == 2 else 8
+
+    if not (args.D_min <= args.D_init <= args.D_max):
+        raise SystemExit(
+            f"--D-init {args.D_init} is outside the search bounds "
+            f"[{args.D_min}, {args.D_max}].\n"
+            f"The continuation walk starts at D=1 and ends at D_init, so an "
+            f"out-of-range start is not a hard guess -- it is a guess the "
+            f"forward problem may have no solution for. The lower bound is a "
+            f"measured property: continuation fails below D ~ 0.45 for this "
+            f"configuration. Widen --D-min only if you have measured that the "
+            f"forward solve survives there.")
 
     if args.data_k <= args.k or args.data_N <= args.N:
         PETSc.Sys.Print(
