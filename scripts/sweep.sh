@@ -53,6 +53,12 @@ warm_cache() {
 export -f run_one
 export LOG
 
+# The log is appended, so mark where each sweep begins. Without this, grepping
+# for failures mixes this run with every previous one -- an earlier diagnosis
+# counted 60 solver failures that mostly belonged to a superseded sweep.
+{ echo; echo "=== $(date -u +%Y-%m-%dT%H:%M:%SZ)  axis=$AXIS  K=$K N=$N D=$D \
+D_INIT=$D_INIT D_PRIOR=$D_PRIOR  sha=$(git rev-parse --short HEAD) ==="; } >>"$LOG"
+
 warm_cache --k "$K" --N "$N" --d "$D" --sigma 1e-3 --seed 0 \
            --D-init "$D_INIT" --D-prior "$D_PRIOR"
 

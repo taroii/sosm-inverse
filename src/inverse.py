@@ -368,11 +368,18 @@ class Inversion:
     def gradient(self):
         return float(self.Jhat.derivative().dat.data_ro[0])
 
-    def solve(self, tol=1e-8, max_iter=100, D_min=0.5, D_max=10.0):
+    def solve(self, tol=1e-6, max_iter=100, D_min=0.5, D_max=10.0):
         """Minimize over log D_12, bounded. Returns the recovered D_12.
 
         The bounds are not a convenience -- they are what keeps the optimizer
         inside the region where the forward problem has a solution at all.
+
+        `tol` is the projected-gradient tolerance. 1e-6, not 1e-8: the recovery
+        error is set by the noise, at roughly 3*sigma, so optimizer precision far
+        below that buys nothing, and demanding 1e-8 made L-BFGS-B exit ABNORMAL
+        on 3 of 50 cells when its line search could no longer make progress.
+        Compare recovered values against a 1e-8 run before trusting this -- they
+        should agree to many digits, since both are far inside the noise.
 
         Continuation experiments put the lower solvability limit near
         D_12 = 0.45 for this configuration: Newton takes 3-4 iterations down to

@@ -69,6 +69,8 @@ def main():
     ap.add_argument("--method", default="lbfgs", choices=("lbfgs",))
     ap.add_argument("--max-iter", type=int, default=100,
                     help="optimizer iterations")
+    ap.add_argument("--gtol", type=float, default=1e-6,
+                    help="projected-gradient tolerance; see Inversion.solve")
     # Search bounds. The lower one is a measured property: continuation fails
     # below D ~ 0.45 for this configuration, so anything under that is not a
     # worse guess, it is a guess with no forward solution. See Inversion.solve.
@@ -159,7 +161,7 @@ def main():
         PETSc.Sys.Print(f"J(D_init)      = {J0:.8e}", flush=True)
         PETSc.Sys.Print(f"dJ/dkappa      = {g0:.8e}\n", flush=True)
 
-        D_rec = inv.solve(max_iter=args.max_iter,
+        D_rec = inv.solve(tol=args.gtol, max_iter=args.max_iter,
                           D_min=args.D_min, D_max=args.D_max)
 
         # Decoupled deliberately: an optional diagnostic must not destroy a
@@ -216,7 +218,7 @@ def main():
                    D_true=args.D_true, D_recovered=D_rec,
                    rel_err=rel_err, sigma=args.sigma, seed=args.seed,
                    D_init=args.D_init, alpha=args.alpha, k=args.k, N=args.N,
-                   D_min=args.D_min, D_max=args.D_max,
+                   D_min=args.D_min, D_max=args.D_max, gtol=args.gtol,
                    d=args.d, method=args.method,
                    n_forward=inv.n_forward, n_adjoint=inv.n_adjoint,
                    hess_status=hess_status,
