@@ -53,7 +53,15 @@ def main():
     # after a 50-iteration Newton failure. 20 percent off the truth is a
     # reasonable starting guess and is comfortably inside the solvable range.
     ap.add_argument("--D-init", type=float, default=1.2)
-    ap.add_argument("--D-prior", type=float, default=None)
+    # Default is the paper's ratio, not the initial guess. template.tex section
+    # 4 sets D_true = 3.5e-2, D_prior = 5.0e-2, so the prior sits 1.4286x ABOVE
+    # the truth, and section 4's Interpretation attributes the residual 6.64
+    # percent bias to exactly that pull. Defaulting the prior to D_init instead
+    # would make the regularization gradient zero at the start and quietly change
+    # what the Tikhonov term does, which is not the experiment the paper runs.
+    # Expressed as a ratio so it tracks D_true rather than being a magic number.
+    ap.add_argument("--D-prior", type=float, default=None,
+                    help="default: 1.4286 * D_true, the paper's ratio")
     ap.add_argument("--alpha", type=float, default=1e-4)
     ap.add_argument("--d", type=int, default=2, choices=(2, 3))
     ap.add_argument("--k", type=int, default=4)
@@ -87,6 +95,9 @@ def main():
         args.data_k = 5 if args.d == 2 else 4
     if args.data_N is None:
         args.data_N = 64 if args.d == 2 else 8
+
+    if args.D_prior is None:
+        args.D_prior = (5.0e-2 / 3.5e-2) * args.D_true
 
     if not (args.D_min <= args.D_init <= args.D_max):
         raise SystemExit(
@@ -197,7 +208,12 @@ def main():
                             f"{', '.join(f'{e:.6e}' for e in spectrum)}", flush=True)
 
         # One summary row, tagged so figures can separate it from the history.
-        run.record(summary=1, D_true=args.D_true, D_recovered=D_rec,
+        # git_sha on the row itself, not only in env.json: aggregating across
+        # runs/ picks up everything ever run, including inversions from before a
+        # bug fix. The sigma=1e-3 seed=0 cell showed three values, one of them
+        # 1.59 from before the point-ordering fix, and nothing in the row said so.
+        run.record(summary=1, git_sha=run.provenance["git_sha"],
+                   D_true=args.D_true, D_recovered=D_rec,
                    rel_err=rel_err, sigma=args.sigma, seed=args.seed,
                    D_init=args.D_init, alpha=args.alpha, k=args.k, N=args.N,
                    D_min=args.D_min, D_max=args.D_max,

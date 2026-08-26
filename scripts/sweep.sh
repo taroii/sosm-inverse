@@ -27,6 +27,13 @@ K="${K:-4}"
 N="${N:-16}"
 D="${D:-2}"
 D_INIT="${D_INIT:-1.2}"
+# The paper's prototype puts the prior ABOVE the truth (1.4286x) and the initial
+# guess further above (3.4286x), and attributes its residual bias to the prior's
+# pull. We keep the prior ratio; D_INIT stays at 1.2 for the noise and mesh axes
+# because the basin axis is where the initial guess is the variable under study.
+# Set D_INIT=3.4286 to mirror the prototype exactly -- verify one run first, it
+# needs four continuation steps per objective evaluation rather than one.
+D_PRIOR="${D_PRIOR:-1.4286}"
 LOG=sweep-$AXIS.log
 
 run_one() {
@@ -46,7 +53,8 @@ warm_cache() {
 export -f run_one
 export LOG
 
-warm_cache --k "$K" --N "$N" --d "$D" --sigma 1e-3 --seed 0 --D-init "$D_INIT"
+warm_cache --k "$K" --N "$N" --d "$D" --sigma 1e-3 --seed 0 \
+           --D-init "$D_INIT" --D-prior "$D_PRIOR"
 
 case "$AXIS" in
     noise)
@@ -54,7 +62,7 @@ case "$AXIS" in
         for s in 1e-4 3e-4 1e-3 3e-3 1e-2; do
             for seed in $SEEDS; do
                 echo --sigma "$s" --seed "$seed" --k "$K" --N "$N" --d "$D" \
-                     --D-init "$D_INIT"
+                     --D-init "$D_INIT" --D-prior "$D_PRIOR"
             done
         done
         ;;
@@ -63,7 +71,7 @@ case "$AXIS" in
         for n in 8 16 32 64; do
             for seed in $SEEDS; do
                 echo --N "$n" --k "$K" --seed "$seed" --sigma 1e-3 --d "$D" \
-                     --D-init "$D_INIT"
+                     --D-init "$D_INIT" --D-prior "$D_PRIOR"
             done
         done
         ;;
@@ -77,7 +85,7 @@ case "$AXIS" in
         for init in 0.6 0.8 1.5 2.5 4.0 8.0; do
             for seed in $SEEDS; do
                 echo --D-init "$init" --seed "$seed" --k "$K" --N "$N" \
-                     --sigma 1e-3 --d "$D"
+                     --sigma 1e-3 --d "$D" --D-prior "$D_PRIOR"
             done
         done
         ;;

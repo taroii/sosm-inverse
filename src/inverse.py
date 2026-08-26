@@ -191,9 +191,21 @@ class Inversion:
 
     def __init__(self, points, data, sigma, D_init, D_prior=None, alpha=1e-4,
                  d=2, k=4, N=16, field=X1, newton_max_it=50, quiet=True,
-                 cont_max_step=0.35):
+                 cont_max_step=0.35, sigma_ref=1e-3):
         self.points = points
         self.sigma = sigma
+        # Overall scale factor. Multiplying an objective by a positive constant
+        # leaves its minimizer, and the relative weight of misfit against
+        # regularization, exactly unchanged -- only the magnitude the solver
+        # sees changes.
+        #
+        # That magnitude matters. The misfit carries a 1/sigma^2 factor, so J
+        # spans eight orders of magnitude across the noise sweep, and with it the
+        # adjoint right-hand side. At sigma = 1e-4 the adjoint residual cannot
+        # reach an absolute snes_atol and every seed exits DIVERGED_MAX_IT, while
+        # sigma = 3e-4 and coarser all succeed. Scaling by (sigma/sigma_ref)^2
+        # pins the magnitude to what it would be at sigma_ref, for every sigma.
+        self.scale = (sigma / sigma_ref) ** 2
         self.field = field
         self.alpha = alpha
         self.n_forward = 0
@@ -293,7 +305,8 @@ class Inversion:
         dkappa = self.kappa - self.kappa_prior
         reg = 0.5 * self.alpha * inner(dkappa, dkappa)
 
-        J = assemble(misfit * dx) + assemble(reg * dx(self.problem.mesh))
+        J = self.scale * (assemble(misfit * dx)
+                          + assemble(reg * dx(self.problem.mesh)))
 
         return ReducedFunctional(J, control,
                                  eval_cb_post=self._on_eval,
