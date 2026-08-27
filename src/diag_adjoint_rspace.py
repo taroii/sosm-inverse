@@ -27,14 +27,18 @@ SCOPE -- read this before quoting a pass. This tests the TOOLCHAIN only. It is
 not evidence about the SOSM formulation.
 
 An earlier version of this docstring claimed the attachment above was the same
-one proposed for SOSM, so that a pass would support both. That was wrong.
-Corollary 2.7 of paper/template.tex disproves the analogous SOSM attachment: in
-the SOSM constitutive block the two terms shift by +t*int(y_1) and -t*int(y_1)
-and cancel, so a multiplier there is unconstrained. No such cancellation exists
-here, because Poisson has a single PDE block whose constant nullspace genuinely
-lives in u's own equation. The formulation below is correct FOR THIS PROBLEM and
-says nothing about where multipliers belong in SOSM -- for that, see Theorem 2.9,
-which puts them in the conservation block (w_1, w_2, q).
+one proposed for SOSM, so that a pass would support both. That was wrong. The
+analogous SOSM attachment fails: in the SOSM constitutive block the two terms
+shift by +t*int(y_1) and -t*int(y_1) and cancel, so a multiplier there is
+unconstrained. No such cancellation exists here, because Poisson has a single
+PDE block whose constant nullspace genuinely lives in u's own equation. The
+formulation below is correct FOR THIS PROBLEM and says nothing about where
+multipliers belong in SOSM, where they go in the conservation block (w_1, w_2,
+q) instead.
+
+That argument is written down nowhere: paper/template.tex has no Section 2.6 and
+states no propositions. It is reasoning recorded in this repository, supported
+numerically by E1b, E5 and E8, and it needs writing up before it is cited.
 
 What a pass does establish, which is still worth having: that "R" blocks,
 matfree, a Schur fieldsplit with MUMPS on the PDE block, and an R-space Control

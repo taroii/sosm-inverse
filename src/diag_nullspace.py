@@ -30,7 +30,7 @@ This script settles it.
 Two measurements, over a sweep of (k, N_mesh, shift):
 
   row_*   the residual paired with a constant test function in each conservation
-          slot (w_1, w_2, q), relative to ||F||. Bears on Lemma 2.8.
+          slot (w_1, w_2, q), relative to ||F||.
   shift_* the relative change in ||F|| under (field + c, constant - c), with
           boundary conditions applied.
 
@@ -89,8 +89,11 @@ def residual_norms(problem, sln):
 
 
 def constant_row_test(problem, sln):
-    """Test Lemma 2.8: do the conservation rows vanish for constant test
-    functions?
+    """Do the conservation rows vanish for constant test functions?
+
+    Referred to elsewhere in this repository as "Lemma 2.8". No such lemma
+    exists: paper/template.tex has no Section 2.6. It is a conjecture supported
+    by the measurements below.
 
     This is the test that matters once the multipliers sit in the conservation
     block. If those rows are genuinely degenerate, l_1, l_2, l_p occupy them and

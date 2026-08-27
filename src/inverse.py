@@ -126,19 +126,34 @@ def observe(sln, spaces, field=X1):
     return assemble(interpolate(at_points, P0_input))
 
 
-def _cache_path(d, k, N, D_true, points):
+def _cache_path(d, k, N, D_true, points, field):
     """Cache key for the clean observations, including the code version.
 
     The git SHA is in the key deliberately: any change to the forward model
     invalidates the cache automatically, which is what stops a stale fine-mesh
     solve from silently contaminating every later run.
+
+    `field` is in the key too, and its absence was a latent bug: `synthetic_data`
+    takes a field index but the key ignored it, so changing the observed field
+    would have silently loaded observations of the PREVIOUS field. No error, and
+    a misfit comparing one quantity against another -- the same failure class as
+    the point-ordering bug of E11.
     """
     from runlog import provenance, repo_root
-    blob = json.dumps({"d": d, "k": k, "N": N, "D": D_true,
+    blob = json.dumps({"d": d, "k": k, "N": N, "D": D_true, "field": field,
                        "pts": np.asarray(points).round(12).tolist(),
                        "sha": provenance()["git_sha"]}, sort_keys=True).encode()
     cache = repo_root() / "runs" / ".data_cache"
     return cache / (hashlib.sha256(blob).hexdigest()[:16] + ".npy")
+
+
+def hash_sigma(sigma):
+    """A stable integer key for a float noise level, for seeding.
+
+    Via the exact bit pattern, so 1e-3 and 0.001 give the same stream and two
+    distinct floats never collide -- unlike rounding or string formatting.
+    """
+    return int(np.float64(sigma).view(np.uint64))
 
 
 def synthetic_data(points, D_true, sigma, seed, d=2, k=5, N=64, field=X1):
@@ -157,7 +172,7 @@ def synthetic_data(points, D_true, sigma, seed, d=2, k=5, N=64, field=X1):
     Returns (values, clean_values) as numpy arrays: noisy and noise-free. The
     second is only for reporting the achievable floor, never for fitting.
     """
-    path = _cache_path(d, k, N, D_true, points)
+    path = _cache_path(d, k, N, D_true, points, field)
     if path.exists():
         clean = np.load(path)
     else:
@@ -169,7 +184,15 @@ def synthetic_data(points, D_true, sigma, seed, d=2, k=5, N=64, field=X1):
         path.parent.mkdir(parents=True, exist_ok=True)
         np.save(path, clean)
 
-    rng = np.random.default_rng(seed)
+    # Seed on (seed, sigma), not seed alone. With `default_rng(seed)` the standard
+    # normal draw z is IDENTICAL at every noise level and only rescaled by sigma,
+    # so a noise sweep measures one realization five times instead of five. That
+    # makes "error scales linearly with sigma" follow from smoothness of the
+    # parameter-to-data map rather than from the data, and it forbids pooling
+    # across levels. SeedSequence mixes the two entries, so (0, 1e-3) and
+    # (0, 1e-2) are independent streams while (0, 1e-3) stays reproducible.
+    # Changing this changes every noise-sweep number: see E13 in notes/results.md.
+    rng = np.random.default_rng(np.random.SeedSequence([seed, hash_sigma(sigma)]))
     noisy = clean + rng.normal(0.0, sigma, size=clean.shape)
     return noisy, clean
 
@@ -323,7 +346,13 @@ class Inversion:
     def _on_derivative(self, value, derivative, controls):
         # Must RETURN the derivatives: pyadjoint uses this callback's return
         # value, not just its side effect, and raises if it gets None.
-        self.n_adjoint += 1
+        #
+        # += n_cont, not += 1. One derivative() call replays the WHOLE tape, so
+        # it performs n_cont adjoint solves, not one. The old accounting was
+        # right only because every reported run so far had n_cont = 1; a basin
+        # cell at D_init = 8 would have reported 9 while performing 54. This is
+        # the headline number for the cost comparison in README.md section IV.
+        self.n_adjoint += self.n_cont
         return derivative
 
     # -- Interface ----------------------------------------------------------
@@ -374,9 +403,13 @@ class Inversion:
         The bounds are not a convenience -- they are what keeps the optimizer
         inside the region where the forward problem has a solution at all.
 
-        `tol` is the projected-gradient tolerance. 1e-6, not 1e-8: the recovery
-        error is set by the noise, at roughly 3*sigma, so optimizer precision far
-        below that buys nothing, and demanding 1e-8 made L-BFGS-B exit ABNORMAL
+        `tol` is the projected-gradient tolerance. 1e-6, not 1e-8. The honest
+        reason is the second one below; the first needs a conversion it does not
+        get. A gradient tolerance is not a parameter accuracy -- they differ by
+        the Hessian, which is about 8e4 here (E12), so tol=1e-6 corresponds to
+        roughly 1e-11 in kappa, far inside a noise-set error of 3*sigma ~ 3e-3.
+        The conversion happens to be comfortable, but it has to be done, not
+        asserted. The decisive reason: demanding 1e-8 made L-BFGS-B exit ABNORMAL
         on 3 of 50 cells when its line search could no longer make progress.
         Compare recovered values against a 1e-8 run before trusting this -- they
         should agree to many digits, since both are far inside the noise.
@@ -384,15 +417,33 @@ class Inversion:
         Continuation experiments put the lower solvability limit near
         D_12 = 0.45 for this configuration: Newton takes 3-4 iterations down to
         D = 0.52, 8 at D = 0.477, and fails outright at D = 0.435, with
-        ten-times-finer steps moving that edge only from 0.55 to 0.48. Below it
-        the Onsager drag is strong enough that the prescribed boundary fluxes
-        demand chemical-potential gradients driving a mole fraction to zero,
-        where mu = RT ln(x p) is singular.
+        ten-times-finer steps moving that edge only from 0.55 to 0.48.
+
+        WHAT THAT NUMBER IS, stated carefully, because an earlier version of
+        this docstring called it "a measured property of the problem" and it is
+        not. Every continuation walk in this repository starts from the SAME
+        place: kappa_ref = 0.0, D_1 * D_2 = 1.0, and D_true = 1.0 all coincide,
+        and `initial_guess()` is the projected EXACT solution. So the walk
+        begins at the truth with an exact initial state, and 0.45 is how far
+        THIS solver, from THAT anchor, with THIS step size, gets before Newton
+        stops converging. It is a property of solver-plus-anchor. A different
+        anchor, a warm start from the previous iterate, or a divergence fallback
+        would each move it, and none of that has been tried.
+
+        The mechanism proposed for it -- that below the edge the Onsager drag is
+        strong enough that the prescribed boundary fluxes demand
+        chemical-potential gradients driving a mole fraction to zero, where
+        mu = RT ln(x p) is singular -- is a hypothesis consistent with the
+        failure mode, not a measurement. Distinguishing it from ordinary Newton
+        stagnation needs the mole fraction minimum tracked along the walk, which
+        no run has done.
 
         Unbounded, L-BFGS takes a first step from D = 1.2 large enough to cross
-        that edge, and the run dies inside a line-search trial. Bounding is the
-        honest fix: the search region is a measured property of the problem, not
-        a tuning parameter, and reporting it is part of the result.
+        that edge, and the run dies inside a line-search trial. Bounding keeps
+        the optimizer inside the region the solver currently reaches, and the
+        bounds must be reported with the result for that reason. The basin
+        sweep's range is derived from 0.45, so it currently measures this
+        configuration rather than the method -- see notes/results.md.
         """
         opt = minimize(self.Jhat, method="L-BFGS-B",
                        bounds=[float(np.log(D_min)), float(np.log(D_max))],

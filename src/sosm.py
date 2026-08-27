@@ -352,11 +352,15 @@ class SOSMProblem:
         # `dof_index_in_mixed_space(Z_h, 3/4/5)` -- one NODAL row in each of the
         # U_1, U_2, P blocks -- and writes our three integral constraints there.
         # Same block, but a nodal row rather than the constant-test row, so the
-        # two eliminations are NOT identical by inspection. Proposition 2.11 of
-        # paper/template.tex proves they agree under the hypothesis that the
-        # conservation block has corank exactly one per field; that hypothesis is
+        # two eliminations are NOT identical by inspection. They agree IF the
+        # conservation block has corank exactly one per field -- a hypothesis
         # shared with the original, since discarding a nodal row from a block of
         # corank two would leave the original singular too.
+        #
+        # UNPROVEN. There is no written proof: paper/template.tex has no
+        # Section 2.6 and defines no propositions. The evidence is numerical --
+        # E5 and E8 reproduce all 56 entries of the source paper's Table 2, and
+        # E1b measures the conservation rows at rounding across a (k, N) sweep.
         #
         # At the solution l_1 = l_2 = l_p = 0; check_constraints asserts this.
 

@@ -12,8 +12,15 @@ Woodbury update executed inside a custom SNES convergence-test callback, and
 `pyadjoint` cannot tape that. Every open problem below traces back to that one
 change.
 
-The analysis of that change is now written up in `paper/template.tex`,
-Section 2.6. Numbered results below refer to it.
+IMPORTANT, and a correction to an earlier version of this file: the analysis of
+that change is NOT written up anywhere. `paper/template.tex` has no Section 2.6 --
+Section 2 runs 2.1 to 2.5 and then Section 3 -- and states no propositions, lemmas
+or corollaries. (It does state three theorems, all in Section 3 and all about the
+Picard inverse iteration, unrelated to what follows.) An earlier version of this
+file cited numbered results from that nonexistent section throughout. Every such
+citation below has been replaced by the argument itself, marked as an argument.
+The arguments are supported numerically by E1b, E5 and E8 in `notes/results.md`;
+none of them is written up, and writing them up is itself an open problem.
 
 
 ## 1. RESOLVED ANALYTICALLY, UNVERIFIED NUMERICALLY: the constraint formulation
@@ -25,12 +32,12 @@ augmented fields $\mu_i + l_i$ and $p + l_p$, then imposed
 
 $$\int c_1 = C_1, \qquad \int c_2 = C_2, \qquad \int (x_1 + x_2) = |\Omega|$$
 
-as variational terms. This is singular. Proposition 2.3 shows that if the
+as variational terms. This is singular. The argument, unwritten, is that if the
 residual depends on $(\mu_i, l_i)$ only through the sum, the Jacobian has a
 three-dimensional kernel at every state, so no solver configuration recovers it.
 
 The asymmetric raw and augmented split copied from the electrolyte code does not
-save it. Proposition 2.5 shows the raw fields enter only against $\mathrm{div}$
+save it. The argument, unwritten, is that the raw fields enter only against $\mathrm{div}$
 of test functions with vanishing normal trace, and
 
 $$\int_\Omega \mathrm{div}(u_i) \, dx = \oint_{\partial\Omega} u_i \cdot n \, ds = 0$$
@@ -46,7 +53,7 @@ the equation tested by its own field's constitutive test function,
 
     res += l_1 * y_1 * dx      # WRONG, do not use
 
-fails for the same reason. Corollary 2.7 gives the proof: the two terms in the
+fails for the same reason. The argument, unwritten: the two terms in the
 constitutive block shift by $t \int y_1$ and $-t \int y_1$ and cancel.
 
 ### The fix that does
@@ -57,7 +64,7 @@ contain all constants, the auxiliary constants are absorbed into $(p_h,
 because they hold identically when the test functions are constant. The integral
 constraints take their place.
 
-Lemma 2.8 proves that degeneracy. For constant $w_i$ the only surviving term is
+That degeneracy is argued, not proved, as follows. For constant $w_i$ the only surviving term is
 $-M_i^{-1} \int \mathrm{div}(J_i)$, which cancels against $\int r_i$ by the
 discrete compatibility condition. For constant $q$ the volume terms convert to
 boundary integrals that cancel the density consistency term exactly. Both
@@ -70,12 +77,13 @@ The multipliers belong in that block:
     res += l_p * q   * dx
 
 with raw $\mu_1, \mu_2, p$ everywhere else and the three constraints unchanged.
-Theorem 2.9 shows this breaks the symmetry and that $l_1 = l_2 = l_p = 0$ at the
-solution, which `check_constraints` now asserts. Theorem 2.10 shows the resulting
+The argument, unwritten, is that this breaks the symmetry and that
+$l_1 = l_2 = l_p = 0$ at the solution, which `check_constraints` now asserts, and
+that the resulting
 Jacobian is nonsingular if and only if the original's is.
 
 The original discards one nodal row per field rather than the constant-test row.
-Proposition 2.11 proves the two eliminations agree, under the hypothesis that the
+The argument, unwritten, is that the two eliminations agree, under the hypothesis that the
 conservation block has corank exactly one per field. That hypothesis is shared
 with the original, since discarding a nodal row from a block of corank two would
 leave the original singular as well.
@@ -103,11 +111,11 @@ with MUMPS on the PDE block, and an R-space Control, on a problem small enough t
 debug.
 
 **This script needs updating before it is run.** Its docstring states that it uses
-the saddle-point attachment proposed in item 1, which Corollary 2.7 disproves. As
+the saddle-point attachment proposed in item 1, which the argument in item 1 rejects. As
 a test of the adjoint machinery it remains valid, since nothing about `matfree`
 plus fieldsplit plus an R-space Control depends on where the multiplier sits. As
 evidence for the SOSM formulation it is now worthless. Either fix the attachment
-to match Theorem 2.9 or delete the claim from the docstring. Do not let a pass
+to match the item-1 argument or delete the claim from the docstring. Do not let a pass
 here be read as support for the formulation.
 
 The `fig02` construction of `SOSMProblem` has been moved above
@@ -142,6 +150,69 @@ comparison tests something wider than the paper's claim.
 
 Running `multicomponent_code/manufactured_solution.py` at the same configuration
 gives error magnitudes to compare against, not just rates.
+
+
+## 3b. UNMEASURED: does the outer Picard inverse iteration contract?
+
+The paper's Theorem 2 gives the local convergence criterion
+$\rho(D\mathcal{T}) < 1$ for the outer loop, with
+
+$$D\mathcal{T} = P_c F_U^{-1} F_\beta H_{\beta\beta}^{-1} G_{\bar c}.$$
+
+It has never been evaluated, for SOSM or for anything else. `src/diag_picard.py`
+evaluates it exactly for $n = 2$, and is written but UNRUN.
+
+**The criterion is one number, not a spectral radius estimate.** $D\mathcal{T}$
+factors through the parameter space, so $\mathrm{rank}\,D\mathcal{T} \le
+\binom{n}{2}$, and since $\sigma(XY)\setminus\{0\} = \sigma(YX)\setminus\{0\}$ the
+criterion reduces to a $\binom{n}{2} \times \binom{n}{2}$ matrix. For $n = 2$ that
+is a scalar:
+
+$$\lambda = -\frac{\langle j_\beta,\, J_{\bar c}\sigma_{\mathrm{nl}}\rangle_W}
+{\langle j_\beta, j_\beta\rangle_W + R''}, \qquad \rho(D\mathcal{T}) = |\lambda|,$$
+
+obtained from three linear solves at the self-consistent point: one linearized
+tangent solve for $j_\beta$, one solve with the nonlinear Jacobian $F_U$ for
+$\sigma_{\mathrm{nl}}$, and one linearized directional solve for
+$J_{\bar c}\sigma_{\mathrm{nl}}$. No outer iteration has to be run to evaluate it.
+
+**Blocking fact found while implementing it.** The Picard-linearized state carries
+$J_1, J_2, v, \mu_1, \mu_2, p$ and nothing else -- the mole fractions are the
+frozen data $\bar c^{(k)}$, not unknowns. So $x_1$ cannot be the step (A)
+observable: $\partial\mathcal{O}/\partial\beta = 0$ identically, and with
+$\alpha > 0$ step (A) returns $\beta_{\mathrm{prior}}$ every round while nothing
+raises. Our inverse experiments all observe $x_1$ (`inverse.py`, `field=X1`),
+which is fine for the direct inversion they perform and unusable for a Picard
+loop. Any Picard run needs a different observable; `src/diag_sensitivity.py`
+ranks the candidates.
+
+**A reduction that does NOT apply here, recorded so it is not re-derived.** An
+analysis in this project reduced $D\mathcal{T}$ to $(I-K)^{-1}$ applied to the
+frozen sensitivity, $K$ being the Jacobian of the ordinary FORWARD Picard
+iteration, concluding that the outer loop contracts iff
+$\sigma(K) \subset \{\mathrm{Re}\,z < 1/2\}$ against $\{|z| < 1\}$ for forward
+Picard -- hence strictly harder in the diffusive regime. That needs the
+Picard-consistency identity $F_{\mathrm{lin}}(U,\beta;P_cU) \equiv F(U,\beta)$
+with both residuals on the SAME space. They are not: the linearized state has 9
+fields against 12, $P_c U_{\mathrm{lin}}$ does not exist, and the linearized model
+cannot produce a new $\bar c$ at all, which is why step (B) exists. $K$ is
+undefined for this formulation. The rank-one criterion above needs no such
+identity.
+
+**Escape hatch, if $\rho \ge 1$.** With $R = \frac{\alpha}{2}\|\beta-\beta_0\|^2$
+at a zero-residual fixed point, the singular values of
+$(J^TWJ + \alpha I)^{-1}J^TW^{1/2}$ are $s_i/(s_i^2+\alpha) \le 1/(2\sqrt\alpha)$,
+so $\|D\mathcal{T}_\alpha\| = O(\alpha^{-1/2})$. Contraction can always be forced
+by regularizing harder, at the cost of the $C_{\mathrm{reg}}\alpha$ bias. That
+makes $\alpha$ a stability dial, not only a bias dial. Caveat: as $\alpha$ grows
+the fixed point moves, the residual stops vanishing, and the second-order terms
+return.
+
+**Also unmeasured.** The FORWARD Picard iteration's contraction rate. The
+reference code's `picard_linearized` mode freezes at the exact manufactured
+solution and performs one linear solve as a discretization study; it does not
+iterate. So the rate the paper's philosophy appeals to has never been observed
+for SOSM either.
 
 
 ## 4. Smaller open items

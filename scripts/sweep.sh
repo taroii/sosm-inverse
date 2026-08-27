@@ -82,12 +82,18 @@ case "$AXIS" in
         done
         ;;
     basin)
-        # Starting guesses spanning the SOLVABLE range, not four orders of
-        # magnitude. Continuation fails below D ~ 0.45 for this configuration
-        # (E11, and the trace in E10b's neighbourhood), so 0.01 and 0.1 are not
-        # hard starting guesses -- they are guesses with no forward solution, and
-        # every such cell would have failed rather than reported a wide basin.
-        # The upper edge is not yet measured; 8.0 sits inside the default bound.
+        # Starting guesses spanning the range the SOLVER currently reaches, not
+        # four orders of magnitude. Continuation fails below D ~ 0.45 here, so
+        # 0.01 and 0.1 would report failures rather than a wide basin.
+        #
+        # Read the result accordingly: 0.45 is not a property of the problem.
+        # Every continuation walk starts at kappa_ref = 0, which coincides with
+        # D_true = 1, from the projected exact solution -- so the edge is where
+        # this solver stops converging when walking away from the truth, and it
+        # would move under a different anchor or a divergence fallback. This
+        # sweep therefore measures the basin of THIS configuration. See the
+        # `solve` docstring in src/inverse.py. The upper edge is unmeasured;
+        # 8.0 sits inside the default bound.
         for init in 0.6 0.8 1.5 2.5 4.0 8.0; do
             for seed in $SEEDS; do
                 echo --D-init "$init" --seed "$seed" --k "$K" --N "$N" \
