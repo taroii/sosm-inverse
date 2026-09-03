@@ -370,27 +370,41 @@ def main():
                     f"rho = {abs(lam_unreg):.6e}")
 
     # Regularized, in each parameterization. W = 1/sigma^2 does not cancel once
-    # R'' is present, so sigma enters here and only here. Chain-rule factors at
-    # D = D_true: beta = 1/D so dbeta/dD = -1/D^2; kappa = log D so
-    # dkappa/dD = 1/D. R'' is alpha in whichever variable R is written.
+    # R'' is present, so sigma enters here and only here.
+    #
+    # THE CHAIN-RULE FACTOR IS SQUARED IN BOTH numerator and denominator, and
+    # getting that wrong is what makes the unregularized value look
+    # parameterization-dependent when it is not. Under D -> theta:
+    #
+    #   j_theta      = j_D * (dD/dtheta)                  one factor
+    #   sigma_theta  = sigma_D * (dD/dtheta)              one factor
+    #   J_c          = dU_lin/dc_bar                      NO factor -- it
+    #                  differentiates in c_bar, not in the parameter
+    #
+    # so <j, J_c sigma> picks up TWO factors and <j, j> picks up two. They
+    # cancel, which is the invariance claimed in the docstring. Only R'' fails
+    # to transform, so only the regularized rows differ between variables --
+    # and here alpha is so far below W<j,j> that they do not differ visibly
+    # either, which is itself the measurement.
+    #
+    # dD/dtheta at D = D_true: theta = beta = 1/D gives -D^2; theta = kappa =
+    # log D gives D. At D = 1 both are +-1, so a squaring error is invisible in
+    # magnitude and shows up only as a sign flip on the beta row.
     D = args.D_true
     W = 1.0 / args.sigma ** 2
-    for label, chain in (("beta = 1/D  ", -1.0 / D ** 2),
-                         ("D           ", 1.0),
-                         ("kappa = logD", 1.0 / D)):
-        # <j,j> in that variable picks up chain^2; the numerator picks up chain.
-        num = W * jJc * chain
-        den = W * jj * chain ** 2 + args.alpha
+    CHAINS = (("beta = 1/D  ", -D ** 2), ("D           ", 1.0),
+              ("kappa = logD", D))
+    for label, dDdt in CHAINS:
+        num = W * jJc * dDdt ** 2
+        den = W * jj * dDdt ** 2 + args.alpha
         PETSc.Sys.Print(f"  R in {label}      lambda = {-num / den:+.6e}   "
                         f"rho = {abs(num / den):.6e}")
 
     # The alpha that would bring rho to 1, in each parameterization. Negative
     # means rho < 1 already at alpha = 0.
     PETSc.Sys.Print("\nalpha giving rho(DT) = 1  (negative: already below 1 at alpha = 0)")
-    for label, chain in (("beta = 1/D  ", -1.0 / D ** 2),
-                         ("D           ", 1.0),
-                         ("kappa = logD", 1.0 / D)):
-        a_crit = W * abs(jJc * chain) - W * jj * chain ** 2
+    for label, dDdt in CHAINS:
+        a_crit = W * (abs(jJc) - jj) * dDdt ** 2
         PETSc.Sys.Print(f"  R in {label}      {a_crit:+.6e}")
 
 
