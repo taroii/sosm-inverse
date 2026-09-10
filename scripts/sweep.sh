@@ -2,10 +2,15 @@
 #
 # Drive the inversion grid. One process per run, several at a time.
 #
-# Concurrency is bounded by MEMORY, not cores. From bench.csv, one inversion at
-# k=4 holds roughly 0.6 GB at N=16, 1.6 GB at N=32 and 5.8 GB at N=64, against
-# 48 GB total. JOBS defaults to 6, which is safe up to N=64; raise it for the
-# smaller meshes.
+# Concurrency is bounded by MEMORY, not cores, and it is now derived PER MESH
+# rather than taken from one global JOBS. An earlier version of this header
+# claimed "JOBS defaults to 6, which is safe up to N=64". It is not, and the
+# mesh axis is the only one that reaches N=64, which is why that axis was the
+# one that died. The 5.822 GB figure it relied on is E9's, and E9 is
+# scripts/bench.sh measuring ONE FORWARD SOLVE. An inversion holds more: the
+# pyadjoint tape retains every continuation state plus adjoint workspace, for
+# every L-BFGS iteration. Six of them is 34.9 GB of forward solves alone
+# against 48 GB, before the tape, the OS and the page cache.
 #
 # Every run writes its own directory, so runs are independent and the sweep can
 # be interrupted and restarted. runlog skips nothing, though -- re-running
@@ -14,14 +19,23 @@
 # Usage:
 #     tmux new -s sweep
 #     source scripts/env.sh
+#     systemd-run --user --scope -p MemoryMax=40G bash scripts/sweep.sh mesh
 #     bash scripts/sweep.sh noise
-#     JOBS=12 N=16 bash scripts/sweep.sh basin
+#     N=16 bash scripts/sweep.sh basin
+#
+# The systemd-run wrapper is not decoration. Ubuntu 24.04 enables systemd-oomd,
+# which kills an entire cgroup rather than one process, and an unwrapped sweep
+# shares its cgroup with the tmux server -- so the session disappears instead of
+# one job failing. Running the sweep in its own scope with a hard MemoryMax
+# confines the kill to the sweep and leaves tmux, and the log, alive.
 
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 AXIS="${1:-noise}"
-JOBS="${JOBS:-6}"
+JOBS="${JOBS:-6}"          # ceiling only; the memory budget usually binds first
+MEM_BUDGET_GB="${MEM_BUDGET_GB:-36}"
+MEM_SAFETY="${MEM_SAFETY:-2.0}"
 SEEDS="${SEEDS:-0 1 2 3 4 5 6 7 8 9}"
 K="${K:-4}"
 N="${N:-16}"
@@ -39,6 +53,39 @@ LOG=sweep-$AXIS.log
 run_one() {
     python src/invert.py "$@" >>"$LOG" 2>&1 \
         && echo "ok   $*" || echo "FAIL $*"
+}
+
+# Peak RSS of one k=4 FORWARD solve at this N, from E9. An inversion holds more
+# and by how much has never been measured, which is what MEM_SAFETY stands in
+# for. Replace both with a measurement as soon as one is available: runlog
+# records peak_rss_gb in every run directory, so the first completed N=64 cell
+# settles it. Until then the safety factor is a guess and is labelled as one.
+footprint_gb() {
+    case "$1" in
+        8)  echo 0.395 ;;
+        16) echo 0.632 ;;
+        32) echo 1.634 ;;
+        64) echo 5.822 ;;
+        *)  echo 5.822 ;;   # unmeasured N: assume the largest measured
+    esac
+}
+
+jobs_for() {
+    awk -v b="$MEM_BUDGET_GB" -v f="$(footprint_gb "$1")" \
+        -v s="$MEM_SAFETY" -v cap="$JOBS" \
+        'BEGIN { n = int(b / (f * s)); if (n < 1) n = 1; if (n > cap) n = cap;
+                 print n }'
+}
+
+# Run one group of cells, all at the same mesh, at a concurrency that fits the
+# budget. Grouping matters for the mesh axis: a single global -P would apply
+# the N=8 job count to the N=64 cells.
+run_group() {
+    local n="$1" j
+    j=$(jobs_for "$n")
+    echo "N=$n: $j concurrent (budget ${MEM_BUDGET_GB} GB, \
+$(footprint_gb "$n") GB forward x $MEM_SAFETY)"
+    xargs -P "$j" -I{} bash -c 'run_one {}'
 }
 
 # Warm the clean-data cache serially before fanning out. The fine-mesh solve is
@@ -62,6 +109,7 @@ D_INIT=$D_INIT D_PRIOR=$D_PRIOR  sha=$(git rev-parse --short HEAD) ==="; } >>"$L
 warm_cache --k "$K" --N "$N" --d "$D" --sigma 1e-3 --seed 0 \
            --D-init "$D_INIT" --D-prior "$D_PRIOR"
 
+cells() {
 case "$AXIS" in
     noise)
         # Recovery error against noise level. Includes the baseline cell.
@@ -73,12 +121,12 @@ case "$AXIS" in
         done
         ;;
     mesh)
-        # Recovery error against inversion mesh, data mesh held fixed.
-        for n in 8 16 32 64; do
-            for seed in $SEEDS; do
-                echo --N "$n" --k "$K" --seed "$seed" --sigma 1e-3 --d "$D" \
-                     --D-init "$D_INIT" --D-prior "$D_PRIOR"
-            done
+        # Recovery error against inversion mesh, data mesh held fixed. Emits
+        # only the N passed in $1; the driver below walks the meshes so each
+        # gets its own concurrency.
+        for seed in $SEEDS; do
+            echo --N "$1" --k "$K" --seed "$seed" --sigma 1e-3 --d "$D" \
+                 --D-init "$D_INIT" --D-prior "$D_PRIOR"
         done
         ;;
     basin)
@@ -105,7 +153,18 @@ case "$AXIS" in
         echo "unknown axis: $AXIS  (noise|mesh|basin)" >&2
         exit 2
         ;;
-esac | xargs -P "$JOBS" -I{} bash -c 'run_one {}'
+esac
+}
+
+# Smallest mesh first, so a budget that is wrong shows up on the cheap cells
+# rather than after hours of work.
+if [ "$AXIS" = mesh ]; then
+    for n in 8 16 32 64; do
+        cells "$n" | run_group "$n"
+    done
+else
+    cells | run_group "$N"
+fi
 
 echo
 echo "log: $LOG"
