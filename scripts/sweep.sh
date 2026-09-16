@@ -22,6 +22,7 @@
 #     systemd-run --user --scope -p MemoryMax=40G bash scripts/sweep.sh mesh
 #     bash scripts/sweep.sh noise
 #     N=16 bash scripts/sweep.sh basin
+#     ANCHORS="0.6 2.0 4.0" bash scripts/sweep.sh anchor
 #
 # The systemd-run wrapper is not decoration. Ubuntu 24.04 enables systemd-oomd,
 # which kills an entire cgroup rather than one process, and an unwrapped sweep
@@ -48,6 +49,7 @@ D_INIT="${D_INIT:-1.2}"
 # Set D_INIT=3.4286 to mirror the prototype exactly -- verify one run first, it
 # needs four continuation steps per objective evaluation rather than one.
 D_PRIOR="${D_PRIOR:-1.4286}"
+ANCHORS="${ANCHORS:-0.6 2.0 4.0}"
 LOG=sweep-$AXIS.log
 
 run_one() {
@@ -92,10 +94,17 @@ $(footprint_gb "$n") GB forward x $MEM_SAFETY)"
 # identical across seeds, but if N jobs start together they all miss the cache
 # and each builds an 11 GB solve at once. One cheap serial run first, then the
 # rest hit the cache and hold only their own inversion.
+# Returns non-zero on failure, so a caller can decline to fan out into cold
+# starts. Doubles as the per-configuration adjoint check README section IV asks
+# for, since --check-gradient verifies the gradient at the configuration given.
 warm_cache() {
     echo "warming data cache (one fine-mesh solve)..."
-    python src/invert.py "$@" --check-gradient >>"$LOG" 2>&1 \
-        && echo "cache warm" || echo "WARN: cache warm failed, see $LOG"
+    if python src/invert.py "$@" --check-gradient >>"$LOG" 2>&1; then
+        echo "cache warm"
+    else
+        echo "WARN: cache warm failed, see $LOG"
+        return 1
+    fi
 }
 export -f run_one
 export LOG
@@ -149,8 +158,23 @@ case "$AXIS" in
             done
         done
         ;;
+    anchor)
+        # Recovery at a true diffusivity away from 1. Every other axis has
+        # D_true = 1, which coincides with the continuation anchor
+        # kappa_ref = 0 and with D_1 * D_2, so every walk starts at the truth
+        # from the exact solution. Emits only the D_true passed in $1. D_init
+        # and D_prior keep the same RATIOS to the truth as the other axes,
+        # 1.2x and 1.4286x, so the only thing that changes is the truth.
+        local d_init d_prior
+        d_init=$(awk -v t="$1" 'BEGIN { printf "%.6g", 1.2 * t }')
+        d_prior=$(awk -v t="$1" 'BEGIN { printf "%.6g", 1.4286 * t }')
+        for seed in $SEEDS; do
+            echo --D-true "$1" --D-init "$d_init" --D-prior "$d_prior" \
+                 --seed "$seed" --k "$K" --N "$N" --sigma 1e-3 --d "$D"
+        done
+        ;;
     *)
-        echo "unknown axis: $AXIS  (noise|mesh|basin)" >&2
+        echo "unknown axis: $AXIS  (noise|mesh|basin|anchor)" >&2
         exit 2
         ;;
 esac
@@ -161,6 +185,22 @@ esac
 if [ "$AXIS" = mesh ]; then
     for n in 8 16 32 64; do
         cells "$n" | run_group "$n"
+    done
+elif [ "$AXIS" = anchor ]; then
+    # The data cache key includes D_true, so the warm-up above (at D_true = 1)
+    # covers none of these. Warm each truth serially first: fanning out cold
+    # would start several 11 GB fine-mesh solves at once, which is the
+    # out-of-memory crash the per-mesh budget exists to prevent. If a warm-up
+    # fails there is no data for that truth, so skip it rather than fan out.
+    for t in $ANCHORS; do
+        d_init=$(awk -v t="$t" 'BEGIN { printf "%.6g", 1.2 * t }')
+        d_prior=$(awk -v t="$t" 'BEGIN { printf "%.6g", 1.4286 * t }')
+        if warm_cache --D-true "$t" --D-init "$d_init" --D-prior "$d_prior" \
+                      --k "$K" --N "$N" --d "$D" --sigma 1e-3 --seed 0; then
+            cells "$t" | run_group "$N"
+        else
+            echo "skipping D_true=$t: no data"
+        fi
     done
 else
     cells | run_group "$N"

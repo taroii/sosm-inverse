@@ -450,20 +450,62 @@ class Inversion:
                        options={"gtol": tol, "maxiter": max_iter})
         kappa_opt = float(opt.dat.data_ro[0])
         self.Jhat(self.at_kappa(kappa_opt))
+        self.kappa_opt = np.array([kappa_opt])
         return float(np.exp(kappa_opt))
 
-    def hessian_spectrum(self):
-        """Eigenvalues of the Hessian in kappa, one Hessian action per column.
+    def hessian_spectrum(self, steps=(1e-2, 1e-3)):
+        """Eigenvalues of the Hessian in kappa at the optimum, by central
+        differences of the ADJOINT GRADIENT. Call after `solve`.
 
-        With one parameter this is a single number. It becomes the identifiability
-        measurement once n > 2: a near-zero eigenvalue means the data does not
-        constrain that combination of diffusivities and the reported value is
-        coming from the regularization instead.
+        Returns one eigenvalue array per step size, in the order of `steps`.
+
+        With one parameter this is a single number. It becomes the
+        identifiability measurement once n > 2: a near-zero eigenvalue means the
+        data does not constrain that combination of diffusivities and the
+        reported value is coming from the regularization instead.
+
+        Why not `Jhat.hessian`. pyadjoint reaches it through a tangent-linear
+        pass that failed in every cell of E15 and E16 with
+            ConvergenceError: DIVERGED_LINEAR_SOLVE  (0 iterations)
+        -- untested hypothesis: the matfree fieldsplit parameters handed to a
+        solve on an already-assembled matrix. The adjoint GRADIENT, by
+        contrast, is verified against finite differences to 1e-10 (E7, E10),
+        so differencing it inherits that verification instead of depending on a
+        path that has never once worked.
+
+        Why two step sizes. Truncation error shrinks with h and gradient noise
+        is amplified as 1/h, and the crossover is not known in advance. The
+        column is computed at every step in `steps` and ALL are reported, so
+        agreement between them is measured rather than assumed.
+
+        Cost: 2 m gradient evaluations per step, each a full continuation plus
+        adjoint. They are NOT inversion cost, so the solve counters and the
+        iteration history are restored afterwards -- otherwise E-series cost
+        baselines and convergence histories would silently include them. The
+        Hessian's own cost is kept on `self.hessian_cost` instead.
         """
-        m = self.kappa.function_space().dim()
-        H = np.zeros((m, m))
-        for j in range(m):
-            e = Function(self.problem.R0)
-            e.dat.data[j] = 1.0
-            H[:, j] = self.Jhat.hessian(e).dat.data_ro
-        return np.linalg.eigvalsh(0.5 * (H + H.T))
+        kappa = np.asarray(self.kappa_opt, dtype=float)
+        m = kappa.size
+        saved = (self.n_forward, self.n_adjoint, len(self.history))
+
+        def grad_at(k):
+            f = Function(self.problem.R0)
+            f.dat.data[:] = k
+            self.Jhat(f)
+            return np.array(self.Jhat.derivative().dat.data_ro, dtype=float)
+
+        spectra = []
+        for h in steps:
+            H = np.zeros((m, m))
+            for j in range(m):
+                e = np.zeros(m)
+                e[j] = h
+                H[:, j] = (grad_at(kappa + e) - grad_at(kappa - e)) / (2.0 * h)
+            spectra.append(np.linalg.eigvalsh(0.5 * (H + H.T)))
+
+        grad_at(kappa)      # leave the tape at the optimum, as `solve` does
+
+        self.hessian_cost = (self.n_forward - saved[0], self.n_adjoint - saved[1])
+        self.n_forward, self.n_adjoint = saved[0], saved[1]
+        del self.history[saved[2]:]
+        return spectra

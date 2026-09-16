@@ -71,9 +71,10 @@ def main():
                     help="optimizer iterations")
     ap.add_argument("--gtol", type=float, default=1e-6,
                     help="projected-gradient tolerance; see Inversion.solve")
-    # Search bounds. The lower one is a measured property: continuation fails
-    # below D ~ 0.45 for this configuration, so anything under that is not a
-    # worse guess, it is a guess with no forward solution. See Inversion.solve.
+    # Search bounds. Continuation from the exact solution at D = 1 fails below
+    # D ~ 0.45 in this configuration. That is a property of this solver and
+    # anchor, not of the problem (see Inversion.solve), but it is where forward
+    # solves currently stop existing, so the lower bound sits above it.
     ap.add_argument("--D-min", type=float, default=0.5)
     ap.add_argument("--D-max", type=float, default=10.0)
     ap.add_argument("--newton-max-it", type=int, default=50,
@@ -107,8 +108,8 @@ def main():
             f"[{args.D_min}, {args.D_max}].\n"
             f"The continuation walk starts at D=1 and ends at D_init, so an "
             f"out-of-range start is not a hard guess -- it is a guess the "
-            f"forward problem may have no solution for. The lower bound is a "
-            f"measured property: continuation fails below D ~ 0.45 for this "
+            f"forward problem may have no solution for. Continuation from "
+            f"D=1 has been observed to fail below D ~ 0.45 in this "
             f"configuration. Widen --D-min only if you have measured that the "
             f"forward solve survives there.")
 
@@ -165,31 +166,18 @@ def main():
                           D_min=args.D_min, D_max=args.D_max)
 
         # Decoupled deliberately: an optional diagnostic must not destroy a
-        # completed inversion. This is NOT a claim that the failure is
-        # understood.
+        # completed inversion. By finite differences of the adjoint gradient,
+        # since pyadjoint's tangent-linear Hessian never worked here; see
+        # Inversion.hessian_spectrum. Its solves are excluded from the forward
+        # and adjoint counts below and reported separately.
         #
-        # What is known: pyadjoint reaches the Hessian through a tangent-linear
-        # pass whose solve goes via `_assembled_solve`, and it fails with
-        #     ConvergenceError: DIVERGED_LINEAR_SOLVE  (0 iterations)
-        # NOT with E0's
-        #     ValueError: Monolithic matrix assembly not supported ...
-        # so the operator assembled successfully and the KSP then failed
-        # immediately. Whatever this is, it is not E0.
-        #
-        # Untested hypothesis: `_assembled_solve` forwards our solver_parameters,
-        # which specify mat_type "matfree" and a fieldsplit tuned for the
-        # matfree operator, to a solve on an already-assembled matrix -- an
-        # inconsistent pairing. Testing that means giving the tangent-linear
-        # solve its own parameters, which is worth doing when the Hessian is
-        # needed and not before: it is a 1x1 matrix while n = 2, and only
-        # becomes the identifiability measurement once several diffusivities
-        # exist.
-        #
-        # The full message is printed and the status recorded, so this stays
-        # visible in the results table rather than only in scrollback.
-        spectrum, hess_status = None, "ok"
+        # The full message is printed and the status recorded, so a failure
+        # stays visible in the results table rather than only in scrollback.
+        HESS_STEPS = (1e-2, 1e-3)
+        spectrum = spectrum_coarse = None
+        hess_status = "ok"
         try:
-            spectrum = inv.hessian_spectrum()
+            spectrum_coarse, spectrum = inv.hessian_spectrum(steps=HESS_STEPS)
         except Exception as exc:
             hess_status = f"{type(exc).__name__}: {exc}".replace("\n", " ")[:200]
             PETSc.Sys.Print(f"hessian eigs   = UNAVAILABLE", flush=True)
@@ -206,8 +194,13 @@ def main():
         PETSc.Sys.Print(f"forward solves = {inv.n_forward}", flush=True)
         PETSc.Sys.Print(f"adjoint solves = {inv.n_adjoint}", flush=True)
         if spectrum is not None:
-            PETSc.Sys.Print(f"hessian eigs   = "
-                            f"{', '.join(f'{e:.6e}' for e in spectrum)}", flush=True)
+            for h, eigs in zip(HESS_STEPS, (spectrum_coarse, spectrum)):
+                PETSc.Sys.Print(f"hessian eigs   = "
+                                f"{', '.join(f'{e:.6e}' for e in eigs)}"
+                                f"   (FD step {h:.0e} in kappa)", flush=True)
+            PETSc.Sys.Print(f"hessian cost   = {inv.hessian_cost[0]} forward, "
+                            f"{inv.hessian_cost[1]} adjoint (excluded above)",
+                            flush=True)
 
         # One summary row, tagged so figures can separate it from the history.
         # git_sha on the row itself, not only in env.json: aggregating across
@@ -223,7 +216,12 @@ def main():
                    n_forward=inv.n_forward, n_adjoint=inv.n_adjoint,
                    hess_status=hess_status,
                    hess_min=float(spectrum.min()) if spectrum is not None else "",
-                   hess_max=float(spectrum.max()) if spectrum is not None else "")
+                   hess_max=float(spectrum.max()) if spectrum is not None else "",
+                   hess_min_coarse=(float(spectrum_coarse.min())
+                                    if spectrum is not None else ""),
+                   hess_step=HESS_STEPS[1], hess_step_coarse=HESS_STEPS[0],
+                   hess_n_forward=(inv.hessian_cost[0]
+                                   if spectrum is not None else ""))
 
 
 def _check_gradient(inv, run, args):

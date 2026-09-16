@@ -270,7 +270,18 @@ def main():
     # -- The self-consistent point: nonlinear solve at the true parameter. ---
     problem = SOSMProblem(d=args.d, k=args.k, N_mesh=args.N, quiet=True)
     fcp = {"quadrature_degree": problem.deg_max}
-    star = solve_forward(problem, D_12=args.D_true, check=False)
+    # Continuation in kappa = log D from the exact solution at D = 1, in steps
+    # no larger than invert.py's default --cont-max-step. A single direct Newton
+    # solve reached every D_true in [0.6, 5] (E14), but the low-D edge near
+    # 0.45 -- where rho grows fastest -- was only ever reached by continuation.
+    # At D_true = 1 this is one solve from the exact state, as before.
+    n_cont = max(1, math.ceil(abs(math.log(args.D_true)) / 0.35))
+    star = None
+    for j in range(1, n_cont + 1):
+        D_j = (args.D_true if j == n_cont
+               else math.exp(j / n_cont * math.log(args.D_true)))
+        star = solve_forward(problem, D_12=D_j, sln=star, check=False)
+    PETSc.Sys.Print(f"continuation     {n_cont} step(s) from D=1")
     PETSc.Sys.Print(f"nonlinear dofs   {problem.Z.dim()}")
 
     # Gauge targets: the reference means. Constants, so they differentiate
