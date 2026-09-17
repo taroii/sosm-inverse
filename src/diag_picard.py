@@ -258,6 +258,15 @@ def main():
                     help="step (A) observable")
     ap.add_argument("--sensors", type=int, default=4,
                     help="sensors per dimension")
+    # SOSMProblem defaults to 10, which invert.py overrides to 50 because an
+    # inversion evaluates the model far from where the initial guess solves it.
+    # The same applies here once D_true is far from 1: the D = 0.45 cell failed
+    # with "after 10 nonlinear iterations", and continuation was separately seen
+    # to need 8 at D = 0.477, so 10 is marginal exactly where rho is largest.
+    ap.add_argument("--newton-max-it", type=int, default=50,
+                    help="Newton iterations per forward solve")
+    ap.add_argument("--cont-max-step", type=float, default=0.35,
+                    help="largest continuation step in kappa")
     ap.add_argument("--sigma", type=float, default=1e-3,
                     help="noise level; enters only the regularized value")
     ap.add_argument("--alpha", type=float, default=1e-4,
@@ -268,14 +277,15 @@ def main():
                     f"D_true={args.D_true} field={args.field}")
 
     # -- The self-consistent point: nonlinear solve at the true parameter. ---
-    problem = SOSMProblem(d=args.d, k=args.k, N_mesh=args.N, quiet=True)
+    problem = SOSMProblem(d=args.d, k=args.k, N_mesh=args.N, quiet=True,
+                          newton_max_it=args.newton_max_it)
     fcp = {"quadrature_degree": problem.deg_max}
     # Continuation in kappa = log D from the exact solution at D = 1, in steps
     # no larger than invert.py's default --cont-max-step. A single direct Newton
     # solve reached every D_true in [0.6, 5] (E14), but the low-D edge near
     # 0.45 -- where rho grows fastest -- was only ever reached by continuation.
     # At D_true = 1 this is one solve from the exact state, as before.
-    n_cont = max(1, math.ceil(abs(math.log(args.D_true)) / 0.35))
+    n_cont = max(1, math.ceil(abs(math.log(args.D_true)) / args.cont_max_step))
     star = None
     for j in range(1, n_cont + 1):
         D_j = (args.D_true if j == n_cont
