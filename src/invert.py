@@ -81,6 +81,12 @@ def main():
                     help="Newton iterations per forward solve")
     ap.add_argument("--cont-max-step", type=float, default=0.35,
                     help="largest continuation step in kappa (0.35 ~ 1.4x in D)")
+    # Default OFF, i.e. the walk is a warm start rather than tape. It makes an
+    # objective evaluation one nonlinear solve instead of n_cont of them. Pass
+    # this flag to reproduce the taped behaviour of E12-E18; see E19 for the
+    # measurement that the two agree.
+    ap.add_argument("--tape-continuation", action="store_true",
+                    help="put the continuation walk on the tape (old behaviour)")
     ap.add_argument("--verbose", action="store_true",
                     help="show the SNES residual history for each solve")
 
@@ -140,6 +146,7 @@ def main():
                         d=args.d, k=args.k, N=args.N,
                         newton_max_it=args.newton_max_it,
                         cont_max_step=args.cont_max_step,
+                        tape_continuation=args.tape_continuation,
                         quiet=not args.verbose)
 
         PETSc.Sys.Print(f"continuation   = {inv.n_cont} steps "

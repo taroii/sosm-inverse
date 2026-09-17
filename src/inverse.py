@@ -214,7 +214,7 @@ class Inversion:
 
     def __init__(self, points, data, sigma, D_init, D_prior=None, alpha=1e-4,
                  d=2, k=4, N=16, field=X1, newton_max_it=50, quiet=True,
-                 cont_max_step=0.35, sigma_ref=1e-3):
+                 cont_max_step=0.35, sigma_ref=1e-3, tape_continuation=False):
         self.points = points
         self.sigma = sigma
         # Overall scale factor. Multiplying an objective by a positive constant
@@ -292,35 +292,83 @@ class Inversion:
         span = abs(float(np.log(D_init)) - self.kappa_ref)
         self.n_cont = max(1, int(np.ceil(span / cont_max_step)))
 
+        # Solves performed per objective evaluation. With the walk ON the tape
+        # every replay repeats all n_cont of them; with it off, a replay is a
+        # single solve and the walk is paid once, at build. This is the factor
+        # the cost comparison in README.md section IV turns on.
+        self.tape_continuation = tape_continuation
+        self._solves_per_eval = self.n_cont if tape_continuation else 1
+
         self.Jhat = self._build()
-        # _build performs n_cont forward solves to lay the tape, and those do
-        # not pass through eval_cb_post. Counting them matters: the cost
-        # comparison in README.md section IV is measured in forward solves.
+        # _build performs n_cont forward solves to lay the tape (taped) or to
+        # reach the starting state (untaped), and those do not pass through
+        # eval_cb_post either way. Counting them matters: they are real work.
         self.n_forward = self.n_cont
 
     # -- Tape ---------------------------------------------------------------
 
     def _build(self):
+        """Lay the tape. The continuation walk is on it or not, per the flag.
+
+        WHY UNTAPING IS CORRECT, since it looks like it should change the
+        gradient and does not. The taped walk makes every intermediate state a
+        differentiable function of the control, so a replay repeats all n_cont
+        solves and the adjoint runs backwards through all of them. But the
+        discrete solution satisfies F(U, kappa) = 0, so
+
+            dU/dkappa = -F_U^-1 F_kappa
+
+        which depends on the EQUATION, not on the path Newton took to solve it.
+        The walk only supplies a starting state. Taping it therefore costs
+        n_cont times the work for a derivative that is, up to solver tolerance,
+        the same one. Untaping keeps the walk as a warm start, performed once
+        with annotation off, and tapes the single solve at kappa itself.
+
+        That argument is why the flag exists rather than a silent switch: it is
+        an argument, and E19 measures it both ways before the untaped path is
+        trusted.
+
+        The cost of taping is the whole reason to care. One derivative() call
+        replays the tape, so at D_init = 8 (n_cont = 6) a taped evaluation is
+        six nonlinear solves and six adjoint solves; untaped it is one of each.
+        """
         control = Control(self.kappa)
 
         sln = Function(self.problem.Z)
         sln.assign(self.guess)
+        kappa_end = float(self.kappa.dat.data_ro[0])
+
+        if not self.tape_continuation:
+            pause_annotation()
 
         # Walk from kappa_ref to kappa in n_cont equal steps, warm-starting each
         # solve from the previous. Interpolating in kappa (not D) makes the
         # steps geometric in D, which is the right spacing for a quantity
-        # spanning orders of magnitude. Every intermediate is a differentiable
-        # function of the control, so the whole walk is on the tape.
-        for j in range(1, self.n_cont + 1):
+        # spanning orders of magnitude.
+        n_walk = self.n_cont if self.tape_continuation else self.n_cont - 1
+        for j in range(1, n_walk + 1):
             frac = j / self.n_cont
-            kap_j = self.kappa_ref + frac * (float(self.kappa.dat.data_ro[0])
-                                             - self.kappa_ref)
-            self.problem.D_12 = exp(self.kappa_ref
-                                    + frac * (self.kappa - self.kappa_ref))
+            kap_j = self.kappa_ref + frac * (kappa_end - self.kappa_ref)
+            if self.tape_continuation:
+                # Every intermediate is a differentiable function of the control.
+                self.problem.D_12 = exp(self.kappa_ref
+                                        + frac * (self.kappa - self.kappa_ref))
+            else:
+                # A plain number: this walk must leave nothing on the tape.
+                self.problem.D_12 = Constant(float(np.exp(kap_j)))
             PETSc.Sys.Print(f"  continuation {j}/{self.n_cont}: "
                             f"D = {np.exp(kap_j):.6f}", flush=True)
             sln = solve_forward(self.problem, sln=sln, check=False)
             self.cont_trace.append(float(np.exp(kap_j)))
+
+        if not self.tape_continuation:
+            continue_annotation()
+            # The one taped solve, at kappa itself, warm-started from the walk.
+            self.problem.D_12 = exp(self.kappa)
+            PETSc.Sys.Print(f"  taped solve at D = {np.exp(kappa_end):.6f} "
+                            f"(walk of {n_walk} untaped)", flush=True)
+            sln = solve_forward(self.problem, sln=sln, check=False)
+            self.cont_trace.append(float(np.exp(kappa_end)))
 
         obs = observe(sln, (self.P0, self.P0_input), self.field)
         misfit = 0.5 * inner(obs - self.data, obs - self.data) / self.sigma ** 2
@@ -336,7 +384,7 @@ class Inversion:
                                  derivative_cb_post=self._on_derivative)
 
     def _on_eval(self, value, controls):
-        self.n_forward += self.n_cont
+        self.n_forward += self._solves_per_eval
         kappa = _scalar(controls)
         self.history.append({"eval": self.n_forward,
                              "J": float(value),
@@ -352,7 +400,7 @@ class Inversion:
         # right only because every reported run so far had n_cont = 1; a basin
         # cell at D_init = 8 would have reported 9 while performing 54. This is
         # the headline number for the cost comparison in README.md section IV.
-        self.n_adjoint += self.n_cont
+        self.n_adjoint += self._solves_per_eval
         return derivative
 
     # -- Interface ----------------------------------------------------------
