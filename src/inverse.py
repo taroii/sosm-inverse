@@ -44,11 +44,26 @@ from firedrake.petsc import PETSc
 
 from sosm import SOSMProblem, solve_forward
 
-__all__ = ["sensor_points", "observer", "observe", "synthetic_data",
+__all__ = ["FIELDS", "LINEARIZED_OK", "SCALAR_FIELDS", "X1", "MU2",
+           "sensor_points", "observer", "observe", "synthetic_data",
            "Inversion"]
 
-# Index of x_1 in the mixed space, i.e. the field we observe.
+# Field indices in the 12-field nonlinear mixed space. The first six are shared
+# with the 9-field Picard-linearized space at the same indices, which is what
+# lets the outer loop of picard.py observe them; X1 and X2 are NOT in the
+# linearized space at all (see E14).
+MM1, MM2, V, MU1, MU2, P = 0, 1, 2, 3, 4, 5
 X1 = 6
+X2 = 7
+FIELDS = {"mm_1": MM1, "mm_2": MM2, "v": V,
+          "mu_1": MU1, "mu_2": MU2, "p": P, "x_1": X1, "x_2": X2}
+# Observable both the direct inversion and the Picard loop can use, for the
+# head-to-head comparison. Scalar, so the DG0 observer handles it.
+LINEARIZED_OK = ("mu_1", "mu_2", "p")
+# `observer` builds a SCALAR "DG" 0 space, so only these can be observed at
+# points. mm_1, mm_2 and v need a VectorFunctionSpace observer, which nothing
+# has exercised -- diag_sensitivity.py is where that would be tried first.
+SCALAR_FIELDS = ("mu_1", "mu_2", "p", "x_1", "x_2")
 
 
 def _scalar(control):
@@ -493,10 +508,36 @@ class Inversion:
         sweep's range is derived from 0.45, so it currently measures this
         configuration rather than the method -- see notes/results.md.
         """
-        opt = minimize(self.Jhat, method="L-BFGS-B",
-                       bounds=[float(np.log(D_min)), float(np.log(D_max))],
-                       options={"gtol": tol, "maxiter": max_iter})
-        kappa_opt = float(opt.dat.data_ro[0])
+        # An ABNORMAL exit from L-BFGS-B used to raise and destroy the whole
+        # cell: 5-6 percent of every sweep (E13, E15, E16, E17) reported nothing
+        # at all. That is the wrong trade. The optimizer exits ABNORMAL when its
+        # line search can no longer make progress, which is not the same as
+        # being far from the answer -- E20 found one such cell sitting within
+        # 3e-8 of the value two finer meshes agreed on. So keep the best iterate
+        # seen, flag it, and let the run finish; a flagged number that can be
+        # checked beats a missing row.
+        #
+        # The best iterate is the one with the lowest objective, NOT the last
+        # one evaluated: the last evaluation is typically the rejected
+        # line-search trial that triggered the exit.
+        self.opt_status = "ok"
+        try:
+            opt = minimize(self.Jhat, method="L-BFGS-B",
+                           bounds=[float(np.log(D_min)), float(np.log(D_max))],
+                           options={"gtol": tol, "maxiter": max_iter})
+            kappa_opt = float(opt.dat.data_ro[0])
+        except Exception as exc:
+            if not self.history:
+                raise
+            self.opt_status = f"{type(exc).__name__}: {exc}".replace("\n", " ")[:160]
+            best = min(self.history, key=lambda r: r["J"])
+            kappa_opt = float(best["kappa"])
+            PETSc.Sys.Print(
+                f"\noptimizer exited abnormally; falling back to the best of "
+                f"{len(self.history)} iterates: D = {np.exp(kappa_opt):.8e}",
+                flush=True)
+            PETSc.Sys.Print(f"  {self.opt_status}", flush=True)
+
         self.Jhat(self.at_kappa(kappa_opt))
         self.kappa_opt = np.array([kappa_opt])
         return float(np.exp(kappa_opt))

@@ -26,7 +26,8 @@ import numpy as np
 
 from firedrake.petsc import PETSc
 
-from inverse import sensor_points, synthetic_data, Inversion
+from inverse import (FIELDS, LINEARIZED_OK, SCALAR_FIELDS, sensor_points,
+                     synthetic_data, Inversion)
 from runlog import Run
 
 
@@ -46,6 +47,12 @@ def main():
     ap.add_argument("--data-N", type=int, default=None)
     ap.add_argument("--sensors", type=int, default=4,
                     help="sensors per spatial direction")
+    # The direct method can observe anything; the Picard loop cannot observe a
+    # concentration (E14). So the head-to-head in README section IV must run
+    # BOTH on a shared field -- mu_2 -- or it compares observables, not methods.
+    ap.add_argument("--field", default="x_1", choices=SCALAR_FIELDS,
+                    help="observed field; picard.py is restricted to "
+                         + ", ".join(LINEARIZED_OK))
 
     # Inversion.
     # 1.2, not 0.3. The old default predates the solvability measurement and
@@ -134,7 +141,8 @@ def main():
 
         points = sensor_points(args.d, args.sensors)
         data, clean = synthetic_data(points, args.D_true, args.sigma, args.seed,
-                                     d=args.d, k=args.data_k, N=args.data_N)
+                                     d=args.d, k=args.data_k, N=args.data_N,
+                                     field=FIELDS[args.field])
 
         PETSc.Sys.Print(f"\nsensors        = {len(points)}", flush=True)
         PETSc.Sys.Print(f"data rms       = {np.sqrt(np.mean(clean**2)):.6e}",
@@ -144,6 +152,7 @@ def main():
         inv = Inversion(points, data, args.sigma, args.D_init,
                         D_prior=args.D_prior, alpha=args.alpha,
                         d=args.d, k=args.k, N=args.N,
+                        field=FIELDS[args.field],
                         newton_max_it=args.newton_max_it,
                         cont_max_step=args.cont_max_step,
                         tape_continuation=args.tape_continuation,
@@ -198,6 +207,7 @@ def main():
         PETSc.Sys.Print(f"D_true         = {args.D_true:.8e}", flush=True)
         PETSc.Sys.Print(f"D_recovered    = {D_rec:.8e}", flush=True)
         PETSc.Sys.Print(f"relative error = {rel_err:.6e}", flush=True)
+        PETSc.Sys.Print(f"optimizer      = {inv.opt_status}", flush=True)
         PETSc.Sys.Print(f"forward solves = {inv.n_forward}", flush=True)
         PETSc.Sys.Print(f"adjoint solves = {inv.n_adjoint}", flush=True)
         if spectrum is not None:
@@ -219,8 +229,9 @@ def main():
                    rel_err=rel_err, sigma=args.sigma, seed=args.seed,
                    D_init=args.D_init, alpha=args.alpha, k=args.k, N=args.N,
                    D_min=args.D_min, D_max=args.D_max, gtol=args.gtol,
-                   d=args.d, method=args.method,
+                   d=args.d, method=args.method, field=args.field,
                    n_forward=inv.n_forward, n_adjoint=inv.n_adjoint,
+                   opt_status=inv.opt_status,
                    hess_status=hess_status,
                    hess_min=float(spectrum.min()) if spectrum is not None else "",
                    hess_max=float(spectrum.max()) if spectrum is not None else "",
