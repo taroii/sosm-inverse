@@ -214,12 +214,24 @@ class PicardInversion:
 
         z = Function(self.lin.Z)
         F = self.lin.residual(z)
+        # NonlinearVariationalProblem/Solver, not `solve(F == 0, ...)`, and
+        # form_compiler_parameters on the PROBLEM. The bare `solve` raises
+        #   RuntimeError: Illegal keyword argument 'form_compiler_parameters'
+        # here but NOT in diag_picard.py, which uses the identical call: that
+        # file never imports firedrake.adjoint, so it gets the plain Firedrake
+        # `solve`, whereas this one gets the annotated override with a stricter
+        # signature. This is the same mistake as the project's very first bug;
+        # sosm.solve_forward has had the correct form all along.
+        #
         # linear=False keeps the Newton options: F is linear in z, so SNES
         # converges in one step, but pyadjoint needs a solve block to tape.
-        solve(F == 0, z, bcs=self.lin.bcs(),
-              solver_parameters=self.lin.solver_parameters(linear=False),
-              form_compiler_parameters={"quadrature_degree":
-                                        self.problem.deg_max})
+        prob = NonlinearVariationalProblem(
+            F, z, bcs=self.lin.bcs(),
+            form_compiler_parameters={"quadrature_degree":
+                                      self.problem.deg_max})
+        NonlinearVariationalSolver(
+            prob,
+            solver_parameters=self.lin.solver_parameters(linear=False)).solve()
         self.n_linearized += 1
 
         obs = observe(z, (self.P0, self.P0_input), self.field_idx)
