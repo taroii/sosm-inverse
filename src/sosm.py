@@ -522,7 +522,12 @@ class SOSMProblem:
 
                 "mat_type": "matfree",
                 "ksp_type": "fgmres",
-                "ksp_gmres_cgs_refinement_type": "refine_always",
+                # Renamed in PETSc 3.26; the old name
+                # `ksp_gmres_cgs_refinement_type` still works but warns on
+                # every solve, which buried the output of a 40-cell sweep.
+                # On PETSc < 3.26 this becomes an unused-option warning
+                # instead, which is harmless.
+                "ksp_orthogonalization_cgs_refinement_type": "refine_always",
                 "ksp_atol": self.ksp_atol,
                 "ksp_rtol": self.ksp_rtol,
 
