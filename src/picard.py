@@ -94,7 +94,8 @@ class PicardInversion:
 
     def __init__(self, points, data, sigma, D_init, D_true, D_prior=None,
                  alpha=1e-4, d=2, k=4, N=16, field="mu_2", newton_max_it=50,
-                 quiet=True, sigma_ref=1e-3, cont_max_step=0.35):
+                 quiet=True, sigma_ref=1e-3, cont_max_step=0.35,
+                 fixed_gauge=False):
         if field not in LINEARIZED_OK:
             raise SystemExit(
                 f"--field {field} is not a variable of the Picard-linearized "
@@ -107,6 +108,7 @@ class PicardInversion:
         self.alpha = alpha
         self.D_true = D_true
         self.cont_max_step = cont_max_step
+        self.fixed_gauge = fixed_gauge
         # Same objective scaling as inverse.Inversion, for the same reason: it
         # keeps the magnitude, and hence the meaning of a gradient tolerance,
         # independent of sigma. A positive constant, so the minimizer is
@@ -193,7 +195,15 @@ class PicardInversion:
         """Gauge targets from the frozen state, via the dropped constitutive law.
 
         See the module docstring: for an inversion these are NOT free constants.
+
+        With `fixed_gauge`, only the first call does anything: the gauge stays at
+        whatever the initial state gave. That makes the gauge a true constant, so
+        it differentiates away and the map this loop iterates becomes the one
+        diag_picard.py linearizes when it computes rho(DT).
         """
+        if self.fixed_gauge and getattr(self, "_gauge_set", False):
+            return
+        self._gauge_set = True
         xb_1, xb_2, pb = (self.lin.frozen["x_1"], self.lin.frozen["x_2"],
                           self.lin.frozen["p"])
         mu_1_cr, mu_2_cr = self.problem.mu_relation(xb_1, xb_2, pb)
@@ -241,8 +251,12 @@ class PicardInversion:
         J = self.scale * (assemble(misfit * dx)
                           + assemble(reg * dx(self.problem.mesh)))
 
-        def on_eval(*_):
+        self.inner_history = []
+
+        def on_eval(value, controls):
             self.n_linearized += 1
+            c = controls[0] if isinstance(controls, (list, tuple)) else controls
+            self.inner_history.append((float(c.dat.data_ro[0]), float(value)))
 
         def on_derivative(value, derivative, controls):
             # Must RETURN the derivative: pyadjoint uses this callback's return
@@ -308,10 +322,15 @@ class PicardInversion:
                                options={"gtol": gtol, "maxiter": max_inner})
                 kappa_new = float(opt.dat.data_ro[0])
             except Exception as exc:
-                # Same trade as inverse.Inversion.solve: keep the previous
-                # iterate and flag it rather than losing the whole run.
+                # Keep the BEST inner iterate, matching inverse.Inversion.solve.
+                # Reverting to kappa_prev (what this did before E24) froze the
+                # loop: |dkappa| became exactly 0, the tolerance test below was
+                # blocked on opt_status, and a run burned every remaining round
+                # doing nothing -- seed 3 of E24 spent 11 rounds and 774
+                # linearized solves that way.
                 opt_status = f"{type(exc).__name__}: {exc}".replace("\n", " ")[:160]
-                kappa_new = kappa_prev
+                kappa_new = (min(self.inner_history, key=lambda t: t[1])[0]
+                             if self.inner_history else kappa_prev)
                 PETSc.Sys.Print(f"  inner solve failed: {opt_status}",
                                 flush=True)
             self.kappa.assign(kappa_new)
@@ -341,12 +360,14 @@ class PicardInversion:
                 f"  nl/lin = {self.n_nonlinear}/{self.n_linearized}", flush=True)
 
             kappa_prev, c_prev = kappa_new, c_new
-            # `opt_status == "ok"` is load-bearing. A failed inner solve leaves
-            # kappa where it was, so d_kappa is 0 and step (B) reproduces the
-            # same state, making d_c 0 too -- which without this guard would be
-            # indistinguishable from convergence and would report a failed run
-            # as a converged one.
-            if opt_status == "ok" and d_kappa < tol and d_c < tol:
+            # Stop when both updates are below tolerance, flagged or not. E21
+            # added an `opt_status == "ok"` guard here so a failed round could
+            # not masquerade as convergence; E24 showed the cost of that guard
+            # is worse than the risk -- runs burned 6 to 11 rounds standing
+            # still. The flag is carried into the summary row instead, so a run
+            # that stopped with failed inner solves is identifiable without
+            # having to waste the rounds.
+            if d_kappa < tol and d_c < tol:
                 break
 
         return float(np.exp(kappa_prev))
@@ -375,6 +396,15 @@ def main():
     ap.add_argument("--D-min", type=float, default=0.5)
     ap.add_argument("--D-max", type=float, default=10.0)
     ap.add_argument("--newton-max-it", type=int, default=50)
+    # diag_picard.py computes rho(DT) with the gauge targets held as CONSTANTS,
+    # so they differentiate away and its d(U_lin)/d(c_bar) carries no gauge
+    # term. This loop recomputes them from the frozen state every round, so its
+    # gauge IS a function of c_bar. The two therefore linearize different maps,
+    # which is the leading explanation for why the measured rate misses rho(DT)
+    # (E24). With this flag the gauge is computed once and frozen, which is the
+    # map the criterion was derived for.
+    ap.add_argument("--fixed-gauge", action="store_true",
+                    help="compute the gauge once, never update it")
     ap.add_argument("--verbose", action="store_true")
     ap.add_argument("--allow-dirty", action="store_true")
     args = ap.parse_args()
@@ -407,6 +437,7 @@ def main():
                               alpha=args.alpha, d=args.d, k=args.k, N=args.N,
                               field=args.field,
                               newton_max_it=args.newton_max_it,
+                              fixed_gauge=args.fixed_gauge,
                               quiet=not args.verbose)
 
         t0 = time.time()
@@ -458,7 +489,8 @@ def main():
                    D_prior=args.D_prior, alpha=args.alpha,
                    k=args.k, N=args.N, d=args.d,
                    rounds=len(inv.history), outer_rate=rate,
-                   outer_rate_n_fit=n_fit,
+                   outer_rate_n_fit=n_fit, sensors=args.sensors,
+                   fixed_gauge=int(args.fixed_gauge),
                    n_nonlinear=inv.n_nonlinear,
                    n_linearized=inv.n_linearized,
                    n_lin_adjoint=inv.n_lin_adjoint, wall_s=wall,
