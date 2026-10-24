@@ -267,6 +267,12 @@ def main():
                     help="Newton iterations per forward solve")
     ap.add_argument("--cont-max-step", type=float, default=0.35,
                     help="largest continuation step in kappa")
+    # Include the gauge's dependence on the frozen state in C. OFF by default
+    # so every value recorded in E14 reproduces exactly -- those numbers are
+    # now serving as regression tests for the whole stack (E22). ON is the map
+    # picard.py actually iterates.
+    ap.add_argument("--gauge-aware", action="store_true",
+                    help="add d(gauge)/dc_bar to C; matches picard.py's map")
     ap.add_argument("--sigma", type=float, default=1e-3,
                     help="noise level; enters only the regularized value")
     ap.add_argument("--alpha", type=float, default=1e-4,
@@ -294,11 +300,17 @@ def main():
     PETSc.Sys.Print(f"continuation     {n_cont} step(s) from D=1")
     PETSc.Sys.Print(f"nonlinear dofs   {problem.Z.dim()}")
 
-    # Gauge targets: the reference means. Constants, so they differentiate
-    # away and touch none of A, B, C -- see the module docstring.
+    # Gauge targets: the reference means. Held as R-space FUNCTIONS, not
+    # Constants, so that UFL can differentiate the residual with respect to
+    # them -- the same reason D_12 is an R-space Function. With
+    # --gauge-aware that derivative is used; without it these are constants in
+    # all but name and the criterion is the one derived in the paper.
     vol = problem.vol
-    gauge = [Constant(assemble(star.subfunctions[i] * problem.dx) / vol)
-             for i in (3, 4, 5)]
+    gauge = []
+    for i in (3, 4, 5):
+        f = Function(problem.R0)
+        f.assign(assemble(star.subfunctions[i] * problem.dx) / vol)
+        gauge.append(f)
 
     lin = Linearized(problem, gauge)
     lin.freeze_at(star)
@@ -358,6 +370,47 @@ def main():
         lambda a, b: a + b,
         [derivative(F_lin, lin.frozen[name], sig.subfunctions[idx])
          for name, idx, _ in FROZEN])
+
+    # THE GAUGE TERM. Without it this criterion describes a map that
+    # picard.py does not iterate, which is why E24 found rho(DT) missing the
+    # measured rate by factors of 0.15 to 92.
+    #
+    # picard.py recomputes the gauge from the frozen state every round, through
+    # the constitutive relation the linearization drops:
+    #
+    #     gauge_i = (1/|Omega|) integral g_i(x_1_bar, x_2_bar, p_bar) dx
+    #
+    # so the gauge is a function of c_bar and contributes to dU_lin/dc_bar:
+    #
+    #     C_total . sigma = dF/dc_bar . sigma + sum_i dF/dgauge_i * delta_i,
+    #     delta_i = (1/|Omega|) integral sum_f (dg_i/df) sigma_f dx
+    #
+    # Each delta_i is a scalar, so dF/dgauge_i * delta_i is one more linear
+    # form. The paper's criterion is the first term alone; the loop's map is
+    # both. Reported separately rather than silently replaced.
+    gauge_terms = None
+    if args.gauge_aware:
+        mu_1_cr, mu_2_cr = problem.mu_relation(lin.frozen["x_1"],
+                                               lin.frozen["x_2"],
+                                               lin.frozen["p"])
+        # (target expression, which frozen fields it actually depends on)
+        deps = [(mu_1_cr, ("x_1", "p")),
+                (mu_2_cr, ("x_2", "p")),
+                (lin.frozen["p"], ("p",))]
+        idx_of = {name: idx for name, idx, _ in FROZEN}
+        for gi, (expr, names) in zip(gauge, deps):
+            delta = 0.0
+            for nm in names:
+                delta += assemble(derivative(expr * problem.dx,
+                                             lin.frozen[nm],
+                                             sig.subfunctions[idx_of[nm]]))
+            d_g = Function(problem.R0)
+            d_g.assign(delta / vol)
+            PETSc.Sys.Print(f"  d(gauge)/dc_bar . sigma  = {delta / vol:+.6e}")
+            term = derivative(F_lin, gi, d_g)
+            gauge_terms = term if gauge_terms is None else gauge_terms + term
+        C_sig = C_sig + gauge_terms
+
     s_c = solve_linear_system(a_lin, -C_sig, lin.Z, hom, lin_params, fcp)
 
     # -- Assemble the criterion. --------------------------------------------
@@ -385,7 +438,10 @@ def main():
     PETSc.Sys.Print(f"cos(j_D, J_c sigma_nl)  "
                     f"{jJc / (np.sqrt(jj) * np.linalg.norm(Jc)):+.6f}")
 
-    PETSc.Sys.Print("\nlambda = -<j,Jc.sigma>_W / (<j,j>_W + R''),  "
+    PETSc.Sys.Print(f"\nC includes the gauge's c_bar dependence: "
+                    f"{bool(args.gauge_aware)}  "
+                    f"({'picard.py default map' if args.gauge_aware else 'the map derived in the paper'})")
+    PETSc.Sys.Print("lambda = -<j,Jc.sigma>_W / (<j,j>_W + R''),  "
                     "rho(DT) = |lambda|, exact for n=2")
     PETSc.Sys.Print(f"  unregularized         lambda = {lam_unreg:+.6e}   "
                     f"rho = {abs(lam_unreg):.6e}")

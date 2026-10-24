@@ -128,9 +128,11 @@ class PicardInversion:
         self.data = Function(self.P0_input)
         self.data.dat.data[:] = data
 
-        # Gauge targets, rewritten from the frozen state every round. Constants,
-        # so `Linearized` keeps a live reference to them.
-        self.gauge = [Constant(0.0), Constant(0.0), Constant(0.0)]
+        # Gauge targets, rewritten from the frozen state every round. R-space
+        # Functions, not Constants, so that diag_picard.py --gauge-aware can
+        # differentiate the residual with respect to them and measure the map
+        # this loop actually iterates. `Linearized` keeps a live reference.
+        self.gauge = [Function(self.problem.R0) for _ in range(3)]
         self.lin = Linearized(self.problem, self.gauge)
 
         # Initial nonlinear state at D_init, by continuation from the exact
