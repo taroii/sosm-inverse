@@ -293,7 +293,7 @@ class PicardInversion:
     # -- the loop -----------------------------------------------------------
 
     def run(self, rounds=12, gtol=1e-6, max_inner=100,
-            D_min=0.5, D_max=10.0, tol=1e-8):
+            D_min=0.5, D_max=10.0, tol=1e-8, stall_max=2):
         """Outer rounds until both updates fall below `tol`, or `rounds`.
 
         `rounds` has a ceiling for a reason: with rho about 0.045 the loop should
@@ -302,6 +302,8 @@ class PicardInversion:
         """
         kappa_prev = float(self.kappa.dat.data_ro[0])
         c_prev = self._concentrations()
+        stalls = 0
+        self.stop_reason = f"round limit {rounds} reached"
 
         for k in range(1, rounds + 1):
             t0 = time.time()
@@ -360,14 +362,26 @@ class PicardInversion:
                 f"  nl/lin = {self.n_nonlinear}/{self.n_linearized}", flush=True)
 
             kappa_prev, c_prev = kappa_new, c_new
-            # Stop when both updates are below tolerance, flagged or not. E21
-            # added an `opt_status == "ok"` guard here so a failed round could
-            # not masquerade as convergence; E24 showed the cost of that guard
-            # is worse than the risk -- runs burned 6 to 11 rounds standing
-            # still. The flag is carried into the summary row instead, so a run
-            # that stopped with failed inner solves is identifiable without
-            # having to waste the rounds.
-            if d_kappa < tol and d_c < tol:
+
+            # Two ways to stop, deliberately kept apart. E21 required
+            # opt_status == "ok" here so a failed inner solve could not
+            # masquerade as convergence; E24 removed that because runs burned 6
+            # to 11 rounds standing still; E25 showed the removal let a run stop
+            # after 2 rounds on a failed solve and report convergence. Neither
+            # extreme is right, so both are handled:
+            #
+            #   converged  - updates below tolerance AND the inner solve worked
+            #   stalled    - `stall_max` consecutive failed inner solves
+            #
+            # and `stop_reason` says which, so a stalled run is never read as a
+            # converged one and never costs more than stall_max wasted rounds.
+            stalls = 0 if opt_status == "ok" else stalls + 1
+            if opt_status == "ok" and d_kappa < tol and d_c < tol:
+                self.stop_reason = "converged"
+                break
+            if stalls >= stall_max:
+                self.stop_reason = f"stalled: {stalls} consecutive inner failures"
+                PETSc.Sys.Print(f"  {self.stop_reason}", flush=True)
                 break
 
         return float(np.exp(kappa_prev))
@@ -470,6 +484,7 @@ def main():
                                            np.log(trans), 1)[0]))
 
         PETSc.Sys.Print(f"\nrounds            = {len(inv.history)}", flush=True)
+        PETSc.Sys.Print(f"stop reason       = {inv.stop_reason}", flush=True)
         PETSc.Sys.Print(f"D_true            = {args.D_true:.8e}", flush=True)
         PETSc.Sys.Print(f"D_recovered       = {D_rec:.8e}", flush=True)
         PETSc.Sys.Print(f"relative error    = {rel_err:.6e}", flush=True)
@@ -490,6 +505,7 @@ def main():
                    k=args.k, N=args.N, d=args.d,
                    rounds=len(inv.history), outer_rate=rate,
                    outer_rate_n_fit=n_fit, sensors=args.sensors,
+                   stop_reason=inv.stop_reason,
                    fixed_gauge=int(args.fixed_gauge),
                    n_nonlinear=inv.n_nonlinear,
                    n_linearized=inv.n_linearized,
