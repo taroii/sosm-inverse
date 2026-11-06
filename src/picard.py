@@ -55,6 +55,17 @@ THREE THINGS THAT ARE NOT FREE CHOICES.
    replaying a stale tape would keep differentiating through the previous
    round's frozen state.
 
+   Rebuilding the tape is necessary and not sufficient, which cost this project
+   three batches of runs. Pyadjoint's checkpoints are attached to the
+   coefficient OBJECTS, not to the tape: assigning into a coefficient with
+   annotation off updates its value and creates no new block variable, so a new
+   tape over the same objects replays their round-1 values forever. The outer
+   map then has no derivative and the loop reports convergence after two rounds
+   having iterated nothing. Every piece of frozen data is therefore
+   re-allocated as a new Function each round, and the live and taped values of
+   a gauge target and a coefficient are recorded every round so that a
+   recurrence is visible in the log rather than inferable from a round count.
+
 WHAT IS MEASURED, not judged. Per round: the parameter update, the concentration
 update, the distance to the true parameter, the misfit of the NONLINEAR model
 against the data (the honest objective, not step (A)'s surrogate), and the cost
@@ -109,6 +120,10 @@ class PicardInversion:
         self.D_true = D_true
         self.cont_max_step = cont_max_step
         self.fixed_gauge = fixed_gauge
+        # Values, not objects: the gauge Functions are re-allocated every round
+        # (see _refresh_frozen_data), so `fixed_gauge` cannot be implemented by
+        # declining to overwrite them.
+        self._gauge_held = None
         # Same objective scaling as inverse.Inversion, for the same reason: it
         # keeps the magnitude, and hence the meaning of a gradient tolerance,
         # independent of sigma. A positive constant, so the minimizer is
@@ -128,10 +143,12 @@ class PicardInversion:
         self.data = Function(self.P0_input)
         self.data.dat.data[:] = data
 
-        # Gauge targets, rewritten from the frozen state every round. R-space
-        # Functions, not Constants, so that diag_picard.py --gauge-aware can
-        # differentiate the residual with respect to them and measure the map
-        # this loop actually iterates. `Linearized` keeps a live reference.
+        # Gauge targets, re-allocated from the frozen state every round.
+        # R-space Functions, not Constants, so that diag_picard.py
+        # --gauge-aware can differentiate the residual with respect to them and
+        # measure the map this loop actually iterates. The LIST is shared with
+        # the Linearized, not copied, which is how _refresh_frozen_data's
+        # replacements reach the residual.
         self.gauge = [Function(self.problem.R0) for _ in range(3)]
         self.lin = Linearized(self.problem, self.gauge)
 
@@ -193,6 +210,28 @@ class PicardInversion:
         continue_annotation()
         self.kappa_at_state = kappa
 
+    def _refresh_frozen_data(self):
+        """Fresh Function objects for every piece of frozen data, each round.
+
+        The loop tapes one linearized solve per round. Mutating a coefficient
+        in place with annotation off leaves pyadjoint replaying the checkpoint
+        it took when that object was first taped, so the inner problem stops
+        changing after round 1, the outer map loses its derivative, and the
+        loop reports convergence after two rounds having iterated nothing.
+        E30 measured exactly that: in round 2 the taped gauge and coefficient
+        still read their round-1 values while the live ones had moved.
+
+        A new Function has no checkpoint to go stale. `self.gauge` is the same
+        list object the Linearized holds, so replacing its elements in place is
+        what makes the new objects visible to the residual -- hence the assert,
+        which turns a future refactor that copies the list into a failure here
+        rather than a silent return of this bug.
+        """
+        assert self.lin.gauge is self.gauge, (
+            "Linearized must share the gauge list, not a copy of it")
+        self.lin.refresh_frozen()
+        self.gauge[:] = [Function(self.problem.R0) for _ in range(3)]
+
     def _update_gauge(self):
         """Gauge targets from the frozen state, via the dropped constitutive law.
 
@@ -203,33 +242,35 @@ class PicardInversion:
         it differentiates away and the map this loop iterates becomes the one
         diag_picard.py linearizes when it computes rho(DT).
         """
-        if self.fixed_gauge and getattr(self, "_gauge_set", False):
+        if self.fixed_gauge and self._gauge_held is not None:
+            for target, val in zip(self.gauge, self._gauge_held):
+                target.assign(val)
             return
-        self._gauge_set = True
         xb_1, xb_2, pb = (self.lin.frozen["x_1"], self.lin.frozen["x_2"],
                           self.lin.frozen["p"])
         mu_1_cr, mu_2_cr = self.problem.mu_relation(xb_1, xb_2, pb)
         vol, dx_ = self.problem.vol, self.problem.dx
         for target, expr in zip(self.gauge, (mu_1_cr, mu_2_cr, pb)):
             target.assign(assemble(expr * dx_) / vol)
+        if self.fixed_gauge:
+            self._gauge_held = [float(g.dat.data_ro[0]) for g in self.gauge]
 
     def _frozen_data_values(self):
         """Live value and TAPED value of one gauge target and one coefficient.
 
-        Both, because they can disagree, and the disagreement is the failure
-        mode this loop is most exposed to. The linearized system carries no
+        Both, because they can disagree, and when they did it cost this
+        project three batches of runs. The linearized system carries no
         concentrations, so the frozen data -- the coefficients c_bar and the
         gauge computed from them -- is the only route by which step (B) reaches
-        step (A). `freeze_at` and `_update_gauge` mutate those objects in place
-        with annotation off, which updates the live value but creates no new
-        block variable; whether pyadjoint then replays the fresh value or a
-        checkpoint taken when the object was first taped decides whether the
-        outer map has any derivative at all.
+        step (A); if the taped value stops tracking the live one, the outer map
+        has no derivative and no rate the loop reports means anything.
 
-        Reading `g.dat.data_ro` alone would show a healthy moving gauge while
-        the optimizer saw a stale one, so it is not a usable instrument on its
-        own. Returns NaN for a value that cannot be read rather than raising:
-        this is a diagnostic and must not be able to fail a run.
+        `_refresh_frozen_data` is what keeps the two together. This records
+        them so that a regression says so in the log instead of hiding behind a
+        plausible round count. Reading the live value alone is NOT an
+        instrument: it showed a healthy moving gauge while the optimizer saw a
+        stale one. Returns NaN for a value that cannot be read rather than
+        raising, since a diagnostic must not be able to fail a run.
         """
         def live(f):
             try:
@@ -256,6 +297,11 @@ class PicardInversion:
         A fresh tape per round: c_bar and the gauge have both moved, and
         replaying last round's tape would differentiate through last round's
         frozen state.
+
+        A fresh tape is necessary and NOT sufficient. The checkpoints live on
+        the coefficient objects, not on the tape, so a new tape over reused
+        coefficients still replays their round-1 values; `_refresh_frozen_data`
+        is the other half and must run before this.
         """
         set_working_tape(Tape())
         control = Control(self.kappa)
@@ -346,10 +392,13 @@ class PicardInversion:
 
         for k in range(1, rounds + 1):
             t0 = time.time()
-            # Bookkeeping, not modelling: keep it off the tape. It would be
-            # discarded by the set_working_tape below anyway, but taping an
-            # assemble per round for nothing is still waste.
+            # Writing the frozen data is bookkeeping, not modelling, so it
+            # stays off the tape. Note what this does NOT buy: the
+            # set_working_tape below discards the tape, not the checkpoints the
+            # coefficients carry, which is why _refresh_frozen_data has to
+            # hand out new objects first.
             pause_annotation()
+            self._refresh_frozen_data()
             self.lin.freeze_at(self.state)
             self._update_gauge()
             continue_annotation()

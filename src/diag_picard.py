@@ -144,6 +144,23 @@ class Linearized:
                        for name, _, key in FROZEN}
         self.gauge = gauge_targets
 
+    def refresh_frozen(self):
+        """Re-allocate the frozen coefficients as brand-new Functions.
+
+        For a caller that tapes a solve once per outer round. Assigning into an
+        existing Function with annotation off updates its value but creates no
+        new block variable, so pyadjoint keeps replaying the checkpoint taken
+        when the object was first taped and the coefficients appear frozen at
+        their round-1 values no matter what is assigned afterwards. A Function
+        that has never been taped cannot carry a stale checkpoint.
+
+        Not needed by a caller that tapes nothing, which is why diag_picard's
+        own `main` does not call it.
+        """
+        S = self.p.spaces
+        self.frozen = {name: Function(S[key], name="bar_" + name)
+                       for name, _, key in FROZEN}
+
     def freeze_at(self, sln):
         """Copy c_bar out of a nonlinear state."""
         for name, idx, _ in FROZEN:
