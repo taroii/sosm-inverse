@@ -20,6 +20,18 @@
 #            before stall_max capped a stalled run at two wasted rounds, so
 #            they describe code that no longer exists. Re-measured here.
 #
+# REVISED after E30. Every Picard number in the draft was produced by a loop
+# whose frozen coefficients never left their round-1 values, so this batch is
+# no longer a seed-count top-up: it is the first measurement of the scheme in
+# Section 3. The direct arm of Phase C is retained even though it reproduced
+# exactly, so that both arms of Table 5 come off the same SHA as before.
+#
+# --rounds is 18, not 12. The old loop iterated a gauge-only map contracting at
+# 0.034 at D_true = 0.6 and settled in 6 rounds; the real map contracts at
+# 0.250 there, which needs about 13 rounds to reach tol = 1e-8 from a round-1
+# step of 0.2. Twelve would have truncated that cell and reported a round limit
+# rather than a rate.
+#
 # The direct arm at D_true = 0.6 and 2.0 (E26, E28) is re-run rather than
 # re-pulled: those cells were produced at 23ad86e and the Picard cells they are
 # compared against will now come from HEAD. The comparison is paired by design,
@@ -47,7 +59,7 @@ SEEDS="${SEEDS:-0 1 2 3 4 5 6 7 8 9}"
 SIGMA="${SIGMA:-1e-3}"
 K="${K:-4}"
 N="${N:-16}"
-ROUNDS="${ROUNDS:-12}"
+ROUNDS="${ROUNDS:-18}"
 
 if ! python -c "import firedrake" >/dev/null 2>&1; then
     echo "ERROR: Firedrake not importable. Run: source scripts/env.sh" >&2
