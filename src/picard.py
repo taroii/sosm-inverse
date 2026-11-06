@@ -466,33 +466,40 @@ def main():
             run.record(**row)
 
         rel_err = abs(D_rec - args.D_true) / args.D_true
-        # Geometric decay fitted to the outer updates: the empirical counterpart
-        # of rho(DT) from diag_picard.py. |dkappa| should fall by rho per round,
-        # so the fitted slope in log space exponentiates to that factor.
+        # Geometric decay of the outer updates: the empirical counterpart of
+        # rho(DT) from diag_picard.py. |dkappa| should fall by rho per round.
         # TRANSIENT ONLY, as the paper specifies. Once the outer update reaches
         # the inner solver's own noise floor it stops decaying, and including
-        # that tail drags the fitted rate toward 1 -- so fit the leading stretch
+        # that tail drags the estimate toward 1 -- so take the leading stretch
         # over which |dkappa| is still strictly falling, and report how many
-        # rounds went into the fit so the number can be judged.
-        dk = [r["d_kappa"] for r in inv.history]
+        # ratios went into the estimate so the number can be judged.
+        # Only rounds whose inner solve reported ok: a failed round's d_kappa
+        # is the distance the optimizer did not move, not a decay step. Round 1
+        # is dropped as well -- it is the jump from D_init, which is set by the
+        # starting guess rather than by the asymptotic factor being estimated.
+        dk = [r["d_kappa"] for r in inv.history if r["opt_status"] == "ok"][1:]
         trans = []
         for v in dk:
             if v <= 0 or (trans and v >= trans[-1]):
                 break
             trans.append(v)
-        rate, n_fit = "", len(trans)
-        if n_fit >= 3:
-            rate = float(np.exp(np.polyfit(np.arange(n_fit),
-                                           np.log(trans), 1)[0]))
+        # Median of the consecutive ratios, not a log-linear fit: one round
+        # landing on the inner solver's floor shifts a median by one position
+        # and a fit by its whole lever arm.
+        ratios = [trans[i + 1] / trans[i] for i in range(len(trans) - 1)]
+        rate, n_fit = "", len(ratios)
+        if n_fit >= 2:
+            rate = float(np.median(ratios))
 
         PETSc.Sys.Print(f"\nrounds            = {len(inv.history)}", flush=True)
         PETSc.Sys.Print(f"stop reason       = {inv.stop_reason}", flush=True)
         PETSc.Sys.Print(f"D_true            = {args.D_true:.8e}", flush=True)
         PETSc.Sys.Print(f"D_recovered       = {D_rec:.8e}", flush=True)
         PETSc.Sys.Print(f"relative error    = {rel_err:.6e}", flush=True)
-        PETSc.Sys.Print(f"outer rate        = {rate}   (geometric decay of "
-                        f"|dkappa| over {n_fit} transient rounds of "
-                        f"{len(inv.history)}; compare rho(DT) from "
+        PETSc.Sys.Print(f"outer rate        = {rate}   (median of {n_fit} "
+                        f"consecutive ratios of |dkappa| over the decaying "
+                        f"stretch of clean rounds, first round dropped, of "
+                        f"{len(inv.history)} rounds; compare rho(DT) from "
                         f"diag_picard.py)", flush=True)
         PETSc.Sys.Print(f"nonlinear solves  = {inv.n_nonlinear}", flush=True)
         PETSc.Sys.Print(f"linearized solves = {inv.n_linearized} forward, "
@@ -506,7 +513,7 @@ def main():
                    D_prior=args.D_prior, alpha=args.alpha,
                    k=args.k, N=args.N, d=args.d,
                    rounds=len(inv.history), outer_rate=rate,
-                   outer_rate_n_fit=n_fit, sensors=args.sensors,
+                   outer_rate_n_ratios=n_fit, sensors=args.sensors,
                    stop_reason=inv.stop_reason,
                    fixed_gauge=int(args.fixed_gauge),
                    n_nonlinear=inv.n_nonlinear,
