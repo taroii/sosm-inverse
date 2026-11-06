@@ -213,6 +213,43 @@ class PicardInversion:
         for target, expr in zip(self.gauge, (mu_1_cr, mu_2_cr, pb)):
             target.assign(assemble(expr * dx_) / vol)
 
+    def _frozen_data_values(self):
+        """Live value and TAPED value of one gauge target and one coefficient.
+
+        Both, because they can disagree, and the disagreement is the failure
+        mode this loop is most exposed to. The linearized system carries no
+        concentrations, so the frozen data -- the coefficients c_bar and the
+        gauge computed from them -- is the only route by which step (B) reaches
+        step (A). `freeze_at` and `_update_gauge` mutate those objects in place
+        with annotation off, which updates the live value but creates no new
+        block variable; whether pyadjoint then replays the fresh value or a
+        checkpoint taken when the object was first taped decides whether the
+        outer map has any derivative at all.
+
+        Reading `g.dat.data_ro` alone would show a healthy moving gauge while
+        the optimizer saw a stale one, so it is not a usable instrument on its
+        own. Returns NaN for a value that cannot be read rather than raising:
+        this is a diagnostic and must not be able to fail a run.
+        """
+        def live(f):
+            try:
+                return float(f.dat.data_ro[0])
+            except Exception:
+                return float("nan")
+
+        def taped(f):
+            try:
+                cp = f.block_variable.checkpoint
+                return float(cp.dat.data_ro[0]) if cp is not None else float("nan")
+            except Exception:
+                return float("nan")
+
+        x1 = self.lin.frozen["x_1"]
+        return {"gauge_mu_2_live": live(self.gauge[1]),
+                "gauge_mu_2_taped": taped(self.gauge[1]),
+                "x_1_bar_live": live(x1),
+                "x_1_bar_taped": taped(x1)}
+
     def _inner_functional(self):
         """Tape ONE linearized solve as a function of kappa, and reduce it.
 
@@ -318,6 +355,8 @@ class PicardInversion:
             continue_annotation()
 
             Jhat = self._inner_functional()
+            # After the tape exists, so the block variables do.
+            frozen_now = self._frozen_data_values()
             opt_status = "ok"
             try:
                 opt = minimize(Jhat, method="L-BFGS-B",
@@ -356,12 +395,24 @@ class PicardInversion:
                    "n_linearized": self.n_linearized,
                    "n_lin_adjoint": self.n_lin_adjoint,
                    "wall_s": time.time() - t0,
-                   "opt_status": opt_status}
+                   "opt_status": opt_status,
+                   **frozen_now}
             self.history.append(row)
             PETSc.Sys.Print(
                 f"  round {k:>2d}  D = {row['D']:.8e}  |dkappa| = {d_kappa:.3e}"
                 f"  |dc| = {d_c:.3e}  misfit = {row['misfit_rms']:.4e}"
                 f"  nl/lin = {self.n_nonlinear}/{self.n_linearized}", flush=True)
+            # Frozen data, live against taped, every round. If the taped
+            # column stops tracking the live one, the optimizer is minimizing
+            # an unchanging surrogate, the outer map has no derivative, and no
+            # rate the loop reports means anything.
+            PETSc.Sys.Print(
+                f"           gauge_mu_2 live/taped = "
+                f"{frozen_now['gauge_mu_2_live']:+.12e} / "
+                f"{frozen_now['gauge_mu_2_taped']:+.12e}"
+                f"   x_1_bar[0] live/taped = "
+                f"{frozen_now['x_1_bar_live']:+.12e} / "
+                f"{frozen_now['x_1_bar_taped']:+.12e}", flush=True)
 
             kappa_prev, c_prev = kappa_new, c_new
 
@@ -477,7 +528,12 @@ def main():
         # is the distance the optimizer did not move, not a decay step. Round 1
         # is dropped as well -- it is the jump from D_init, which is set by the
         # starting guess rather than by the asymptotic factor being estimated.
-        dk = [r["d_kappa"] for r in inv.history if r["opt_status"] == "ok"][1:]
+        # Drop round 1 BY ITS ROUND NUMBER, then filter. Filtering first and
+        # slicing [1:] would, on a run whose round 1 failed, discard round 2 --
+        # a legitimate decay step -- while the D_init jump this is meant to
+        # remove was never in the list to begin with.
+        dk = [r["d_kappa"] for r in inv.history
+              if r["round"] > 1 and r["opt_status"] == "ok"]
         trans = []
         for v in dk:
             if v <= 0 or (trans and v >= trans[-1]):
