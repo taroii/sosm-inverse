@@ -1,23 +1,23 @@
 #!/usr/bin/env bash
 #
-# Table 5c: does the Picard fixed point's offset from the direct optimum match
-# the first-order prediction from its own residual, SEED BY SEED?
+# Table 5c: the per-seed test of the frozen-model error identity.
 #
-# The existing Table 5b shows the two methods agree in spread and correlate at
-# +0.97 to +0.997. That is consistent with the proposed identity but does not
-# test it: two quantities can correlate because both track the noise. This runs
-# the sharper test -- predict each seed's offset from that seed's own residual
-# and curvature, and compare with the offset actually observed.
+# Table 5b shows the two methods correlate at +0.97 to +0.997, which is
+# consistent with the identity but does not test it -- two quantities can
+# correlate because both track the same noise. This predicts each seed's offset
+# from that seed's own residual and curvature, with no fitted parameter, and
+# reports both sides of four separate claims (T1-T4) plus the discretization
+# gap (T5).
 #
-# No Picard runs are repeated. kappa_pic and kappa_dir are read off the records
-# in runs/; the only new work is evaluating the full reduced objective and its
-# adjoint gradient at kappa_pic, which is a handful of solves per seed.
+# No Picard or direct runs are repeated: beta* and betahat are read from runs/,
+# and the new work is the three criterion solves plus a handful of forward
+# solves per seed, at that seed's own fixed point rather than at D_true.
 #
 # Usage:
 #     source scripts/env.sh
 #     bash scripts/offset_test.sh
 #
-# Roughly 20-40 minutes for 30 seeds.
+# Roughly 30-60 minutes for 30 seeds.
 
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
